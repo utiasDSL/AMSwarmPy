@@ -5,3 +5,6 @@ amswarm.egg-info/
 /.vscode/
 **/__pycache__/
 **/*.png
+# pixi environments
+.pixi
+*.egg-info

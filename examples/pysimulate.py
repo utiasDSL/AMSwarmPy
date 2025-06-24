@@ -1,15 +1,15 @@
 """
-AMSwarm Simulation with Line Formation and Benchmarking
+AMSwarmPy Simulation with Line Formation and Benchmarking
 
-This module simulates drone swarm behavior using AMSwarm for trajectory planning,
+This module simulates drone swarm behavior using AMSwarmPy for trajectory planning,
 with drones arranged in a line on the x-axis flying from y=-1 to y=1.
-It also includes benchmarking functionality to measure AMSwarm's performance.
+It also includes benchmarking functionality to measure AMSwarmPy's performance.
 """
 
 import time
 from pathlib import Path
 
-import amswarm
+import amswarmpy
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
@@ -19,15 +19,17 @@ from utils import generate_random_waypoints
 def solve_swarm(swarm, current_time, initial_states, input_drone_results, constraint_configs):
     """Solve the optimization problem for the swarm."""
     for cfg in constraint_configs:
-        cfg.setWaypointsConstraints(True, False, False)
+        cfg.set_waypoints_constraints(True, False, False)
     solve_success, iters, drone_results = swarm.solve(
         current_time, initial_states, input_drone_results, constraint_configs
     )
+    if not solve_success:
+        raise RuntimeError(f"Solver failed to find a valid solution at time {current_time}")
     return drone_results
 
 
 def simulate(waypoints):
-    """Run the AMSwarm simulation and record timing for solve steps.
+    """Run the AMSwarmPy simulation and record timing for solve steps.
 
     Returns a dict with 'positions', 'timestamps', and timing info.
     """
@@ -49,15 +51,11 @@ def simulate(waypoints):
     }
 
     # Timing storage
-    timings = {
-        "solve_times": [],
-        "advance_times": [],
-        "solve_steps": [],
-    }
+    timings = {"solve_times": [], "advance_times": [], "solve_steps": []}
 
     t0 = time.perf_counter()
     drone_results = [
-        amswarm.DroneResult.generateInitialDroneResult(
+        amswarmpy.DroneResult.generate_initial_drone_result(
             initial_positions[k], settings["MPCConfig"]["K"]
         )
         for k in waypoints
@@ -67,19 +65,19 @@ def simulate(waypoints):
 
     # Initialize drones and swarm
     amswarm_kwargs = {
-        "solverConfig": amswarm.AMSolverConfig(**settings["AMSolverConfig"]),
-        "mpcConfig": amswarm.MPCConfig(**settings["MPCConfig"]),
-        "weights": amswarm.MPCWeights(**settings["MPCWeights"]),
-        "limits": amswarm.PhysicalLimits(**settings["PhysicalLimits"]),
-        "dynamics": amswarm.SparseDynamics(**settings["Dynamics"]),
+        "solver_config": amswarmpy.AMSolverConfig(**settings["AMSolverConfig"]),
+        "mpc_config": amswarmpy.MPCConfig(**settings["MPCConfig"]),
+        "weights": amswarmpy.MPCWeights(**settings["MPCWeights"]),
+        "limits": amswarmpy.PhysicalLimits(**settings["PhysicalLimits"]),
+        "dynamics": amswarmpy.SparseDynamics(**settings["Dynamics"]),
     }
 
-    drones = [amswarm.Drone(waypoints=waypoints[key], **amswarm_kwargs) for key in waypoints]
-    swarm = amswarm.Swarm(drones)
+    drones = [amswarmpy.Drone(waypoints=waypoints[key], **amswarm_kwargs) for key in waypoints]
+    swarm = amswarmpy.Swarm(drones)
 
     # Set initial states
     initial_states = [np.concatenate((initial_positions[k], [0, 0, 0])) for k in waypoints]
-    constraint_configs = [amswarm.ConstraintConfig() for k in waypoints]
+    constraint_configs = [amswarmpy.ConstraintConfig() for k in waypoints]
 
     t0 = time.perf_counter()
     drone_results = solve_swarm(swarm, 0, initial_states, drone_results, constraint_configs)
@@ -101,7 +99,7 @@ def simulate(waypoints):
             timings["solve_times"].append(t1 - t0)
             t2 = time.perf_counter()
             for result in drone_results:
-                result.advanceForNextSolveStep()
+                result.advance_for_next_solve_step()
             t3 = time.perf_counter()
             timings["advance_times"].append(t3 - t2)
 
@@ -183,7 +181,7 @@ def plot_benchmark_results(times: dict[str, list[float]], path: Path):
 
     plt.xlabel("Swarm Size")
     plt.ylabel("Time (seconds)")
-    plt.title("AMSwarm Performance Benchmark")
+    plt.title("AMSwarmPy Performance Benchmark")
     plt.legend()
     plt.grid(True)
     plt.yscale("log")  # Use log scale for better visualization
@@ -193,10 +191,13 @@ def plot_benchmark_results(times: dict[str, list[float]], path: Path):
 
 def main():
     np.random.seed(42)
+    np.seterr(invalid="raise")
+    np.set_printoptions(precision=5, suppress=True)
+
     # Run benchmark
     swarm_sizes = [1, 2, 4, 8, 16, 32, 64, 128]
     times = benchmark(swarm_sizes)
-    plot_benchmark_results(times, path=Path(__file__).parent / "benchmark.png")
+    plot_benchmark_results(times, path=Path(__file__).parent / "benchmark_py.png")
 
 
 if __name__ == "__main__":

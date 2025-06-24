@@ -48,6 +48,7 @@ Drone::Drone(AMSolverConfig solverConfig, MatrixXd waypoints, MPCConfig mpcConfi
     initialQuadCost = 2 * weights.input_smoothness * (W_ddot.transpose() * W_ddot);
     initialQuadCost += 2 * weights.smoothness * W_input.transpose() * S_u_prime.transpose() * selectionMats.M_a.transpose() * selectionMats.M_a * S_u_prime * W_input;
     initialQuadCost += 2 * weights.input_continuity * G_u_T_G_u;
+    // TODO: This vector is not initialized with zeros. Is this intentional?
     initialLinearCost = VectorXd(3*(mpcConfig.n+1));
     linearCostSmoothnessConstTerm = 2 * weights.smoothness * M_a_S_u_prime_W_input.transpose() * M_a_S_x_prime;
 };
@@ -65,6 +66,8 @@ void Drone::preSolve(const DroneSolveArgs& args) {
     VectorXd extracted_waypoints_acc(3 * n);
     for (int i = 0; i < n; ++i) {
         for (int j = 0; j < 3; ++j) {
+            // TODO: If waypoints are less than 7+j we access out of bounds!
+            // Access waypoint values after verifying bounds
             extracted_waypoints_pos(i * 3 + j) = extracted_waypoints(i, 1 + j);
             extracted_waypoints_vel(i * 3 + j) = extracted_waypoints(i, 4 + j);
             extracted_waypoints_acc(i * 3 + j) = extracted_waypoints(i, 7 + j);

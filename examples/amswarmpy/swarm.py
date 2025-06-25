@@ -21,19 +21,22 @@ class Swarm:
         self.drones = drones
         # Collision envelope for each drone at each time step
         self.all_obstacle_envelopes: list[np.ndarray] = []
+        self._reduced_collision_envelopes: list[np.ndarray] = []
         if self.drones:
-            K = self.drones[0].get_K()  # TODO: check if all drones have same K
-
             # Create identity matrix of size K+1 x K+1
-            eye_kp1 = np.eye(K + 1)
+            eye_kp1 = np.eye(self.drones[0].mpc_config.K + 1)
 
             # Create collision matrices over all time steps for each drone
             for i in range(self.num_drones):
                 # At each time step, each drone will take the relevant collision envelopes
                 # from this vector according to which drones they need to avoid
-                self.all_obstacle_envelopes.append(
-                    np.kron(eye_kp1, self.drones[i].get_collision_envelope())
-                )
+                envelope = self.drones[i].collision_envelope
+                self.all_obstacle_envelopes.append(np.kron(eye_kp1, envelope * np.eye(3)))
+                self._reduced_collision_envelopes.append(envelope)
+        self.avoidance_map = {
+            i: [j for j in range(self.num_drones) if j != i] for i in range(self.num_drones)
+        }
+        # self.avoidance_map = assign_tuples(list(combinations(range(self.num_drones), 2)))
 
     def solve(
         self,
@@ -70,24 +73,9 @@ class Swarm:
         ):
             raise ValueError("Input lists must all have same length as number of drones in swarm")
 
-        # Initialize avoidance responsibility counters and map
-        avoidance_counts = [0] * self.num_drones
-        avoidance_map = {i: [] for i in range(self.num_drones)}
-
-        # Determine avoidance responsibilities
-        for i in range(self.num_drones):
-            for j in range(i + 1, self.num_drones):
-                # Assign avoidance responsibility to drone with fewer existing responsibilities
-                if avoidance_counts[i] <= avoidance_counts[j]:
-                    avoidance_map[i].append(j)
-                    avoidance_counts[i] += 1
-                else:
-                    avoidance_map[j].append(i)
-                    avoidance_counts[j] += 1
-
         # Initialize results
-        is_success = [False] * self.num_drones
-        iters = [0] * self.num_drones
+        is_success = np.zeros(self.num_drones, dtype=bool)
+        iters = np.zeros(self.num_drones)
         results = [None] * self.num_drones
 
         # Solve for each drone
@@ -97,14 +85,16 @@ class Swarm:
             num_obstacles = 0
 
             # Check for potential collisions with drones this drone needs to avoid
-            for avoid_drone in avoidance_map[i]:
-                if self._check_intersection(
-                    previous_results[i].position_trajectory_vector,
-                    previous_results[avoid_drone].position_trajectory_vector,
-                    0.9 * self.all_obstacle_envelopes[avoid_drone],  # TODO: remove magic number
-                ):
+            for avoid_drone in self.avoidance_map[i]:
+                # Time taken: 5.00e-05 seconds
+                intersect = check_intersection(
+                    previous_results[i].position_trajectory,
+                    previous_results[avoid_drone].position_trajectory,
+                    self._reduced_collision_envelopes[avoid_drone],
+                )
+                if intersect:
                     obstacle_positions.append(
-                        previous_results[avoid_drone].position_trajectory_vector
+                        previous_results[avoid_drone].position_trajectory.flatten()
                     )
                     obstacle_envelopes.append(self.all_obstacle_envelopes[avoid_drone])
                     num_obstacles += 1
@@ -130,24 +120,31 @@ class Swarm:
 
         return is_success, iters, results
 
-    def _check_intersection(self, traj1: np.ndarray, traj2: np.ndarray, theta: np.ndarray) -> bool:
-        """Checks if two trajectories intersect given their positions and a collision envelope matrix.
 
-        Args:
-            traj1: Position trajectory of first drone
-            traj2: Position trajectory of second drone
-            theta: Collision envelope matrix
+def check_intersection(traj1: np.ndarray, traj2: np.ndarray, theta: np.ndarray) -> bool:
+    """Check if two trajectories intersect given their positions and a collision envelope matrix.
 
-        Returns:
-            True if trajectories intersect, False otherwise
-        """
-        # theta accounts for collision envelopes by scaling difference between trajectories
-        diff = theta @ (traj1 - traj2)
-        # Iterate over chunks of 3 rows (x,y,z positions for one time)
-        for i in range(0, diff.shape[0], 3):
-            norm = np.linalg.norm(diff[i : i + 3])
-            # If norm of any chunk is <= 1, return True for intersection
-            if norm <= 1.0:
-                return True
-        # If no chunk's norm was <= 1, then no intersection detected
-        return False
+    Args:
+        traj1: Position trajectory of first drone
+        traj2: Position trajectory of second drone
+        theta: Collision envelope matrix
+
+    Returns:
+        True if trajectories intersect, False otherwise
+    """
+    assert traj1.shape == traj2.shape
+    assert traj1.shape[1] == 3, f"Shape {traj1.shape} != (N, 3)"
+    assert theta.shape == (3,)
+    return np.any(np.linalg.norm((traj1 - traj2) * theta, axis=-1) <= 1.0)
+
+
+def assign_tuples(pairs: list[tuple[int, int]]) -> dict[int, list[int]]:
+    """Assign each pair to the endpoint with fewer assignments.
+
+    This function is greedy. Can be improved by Integer Linear Programming (ILP) with e.g. pulp.
+    """
+    assigned = {i: [] for i in range(len(pairs))}
+    for i, j in pairs:
+        idx_source, idx_target = (i, j) if len(assigned[i]) <= len(assigned[j]) else (j, i)
+        assigned[idx_source].append(idx_target)
+    return assigned

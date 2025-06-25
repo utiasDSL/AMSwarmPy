@@ -3,14 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+from numpy.typing import NDArray
+from scipy.special import comb
 
-from .amsolver import AMSolver, AMSolverConfig
-from .constraint import EqualityConstraint, InequalityConstraint, PolarInequalityConstraint
-from .utils import nchoosek
+from .constraint import (
+    Constraint,
+    EqualityConstraint,
+    InequalityConstraint,
+    PolarInequalityConstraint,
+)
 
 
-class Drone(AMSolver):
-    """The Drone class is a subclass of AMSolver used to solve drone trajectory optimization problems.
+class Drone:
+    """The Drone class solves the drone trajectory optimization problem.
 
     Args:
         solver_config: Configuration for the AMSolver
@@ -30,111 +35,58 @@ class Drone(AMSolver):
         limits: PhysicalLimits,
         dynamics: SparseDynamics,
     ):
-        super().__init__(solver_config)
+        self.constraints: list[Constraint] = []
+        self.solver_config = solver_config
+
         self.waypoints = waypoints
         self.mpc_config = mpc_config
         self.weights = weights
         self.limits = limits
-        self.dynamics = dynamics
-        self.selection_mats = SelectionMatrices(mpc_config.K)
 
         # Print initialization parameters
         # TODO: REMOVE. THIS IS REPLICATING A BUG IN THE CPP CODE.
         self.limits.y_collision_envelope = self.limits.x_collision_envelope
         self.limits.z_collision_envelope = self.limits.x_collision_envelope
 
-        # Set numpy print options to 2 digits for cleaner output
-
         # Initialize collision envelope matrix
-        self.collision_envelope = np.zeros((3, 3))
-        self.collision_envelope[0, 0] = 1.0 / limits.x_collision_envelope
-        self.collision_envelope[1, 1] = 1.0 / limits.y_collision_envelope
-        self.collision_envelope[2, 2] = 1.0 / limits.z_collision_envelope
+        self.collision_envelope = 1.0 / np.array(
+            [limits.x_collision_envelope, limits.y_collision_envelope, limits.z_collision_envelope]
+        )
 
         # Initialize Bernstein and dynamics matrices
-        self.W, self.W_dot, self.W_ddot, self.W_input = self.init_bernstein_matrices(mpc_config)
-        self.S_x, self.S_u, self.S_x_prime, self.S_u_prime = (
-            self.init_full_horizon_dynamics_matrices(dynamics)
-        )
+        self.W, self.W_dot, self.W_ddot, W_input = self.init_bernstein_matrices(mpc_config)
+        self.S_x, S_u, S_x_prime, S_u_prime = self.init_full_horizon_dynamics_matrices(dynamics)
         # Precompute matrices that don't change at solve time
-        self.S_u_W_input = self.S_u @ self.W_input
-        self.M_p_S_u_W_input = self.selection_mats.M_p @ self.S_u_W_input
-        self.M_v_S_u_W_input = self.selection_mats.M_v @ self.S_u_W_input
-        self.M_a_S_u_prime_W_input = self.selection_mats.M_a @ self.S_u_prime @ self.W_input
-        self.M_p_S_x = self.selection_mats.M_p @ self.S_x
-        self.M_v_S_x = self.selection_mats.M_v @ self.S_x
-        self.M_a_S_x_prime = self.selection_mats.M_a @ self.S_x_prime
+        self.S_u_W_input = S_u @ W_input
+
+        # Create an index of 0:3, 6:9, 12:15, ...
+        p_idx = np.arange((mpc_config.K + 1) * 6).reshape(-1, 6)[..., :3].flatten()
+        # Create an index of 3:6, 9:12, 15:18, ...
+        v_idx = np.arange((mpc_config.K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
+        a_idx = np.arange((mpc_config.K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
+        self.M_p_S_u_W_input = self.S_u_W_input[p_idx]
+        self.M_v_S_u_W_input = self.S_u_W_input[v_idx]
+        self.M_a_S_u_prime_W_input = S_u_prime[a_idx] @ W_input
+
+        self.M_p_S_x = self.S_x[p_idx]
+        self.M_v_S_x = self.S_x[v_idx]
+        self.M_a_S_x_prime = S_x_prime[a_idx]
 
         # Precompute constraint matrices
-        self.G_u = np.zeros((9, 3 * (mpc_config.n + 1)))
-        self.G_u[0:3, :] = self.W[0:3, 0 : 3 * (mpc_config.n + 1)]
-        self.G_u[3:6, :] = self.W_dot[0:3, 0 : 3 * (mpc_config.n + 1)]
-        self.G_u[6:9, :] = self.W_ddot[0:3, 0 : 3 * (mpc_config.n + 1)]
-        self.G_u_T = self.G_u.T
-        self.G_u_T_G_u = self.G_u_T @ self.G_u
-        self.G_p = np.zeros((6 * (mpc_config.K + 1), 3 * (mpc_config.n + 1)))
-        self.G_p[0 : 3 * (mpc_config.K + 1), :] = self.M_p_S_u_W_input
-        self.G_p[3 * (mpc_config.K + 1) :, :] = -self.M_p_S_u_W_input
-
+        s = (slice(3), slice(3 * (mpc_config.n + 1)))  # [:3, :3 * (mpc_config.n + 1)]
+        self.G_u = np.concat((self.W[s], self.W_dot[s], self.W_ddot[s]))
+        self.G_p = np.concat((self.M_p_S_u_W_input, -self.M_p_S_u_W_input))
         # Initialize cost matrices
         self.initial_quad_cost = 2 * weights.input_smoothness * (self.W_ddot.T @ self.W_ddot)
         self.initial_quad_cost += (
-            2
-            * weights.smoothness
-            * self.W_input.T
-            @ self.S_u_prime.T
-            @ self.selection_mats.M_a.T
-            @ self.selection_mats.M_a
-            @ self.S_u_prime
-            @ self.W_input
+            2 * weights.smoothness * W_input.T @ S_u_prime[a_idx].T @ S_u_prime[a_idx] @ W_input
         )
-        self.initial_quad_cost += 2 * weights.input_continuity * self.G_u_T_G_u
+
+        self.initial_quad_cost += 2 * weights.input_continuity * self.G_u.T @ self.G_u
         self.initial_linear_cost = np.zeros(3 * (mpc_config.n + 1))
         self.linear_cost_smoothness_const_term = (
             2 * weights.smoothness * self.M_a_S_u_prime_W_input.T @ self.M_a_S_x_prime
         )
-
-    def get_collision_envelope(self) -> np.ndarray:
-        """Get the drone's collision envelope matrix"""
-        return self.collision_envelope
-
-    def get_K(self) -> int:
-        """Get the horizon length K"""
-        return self.mpc_config.K
-
-    def extract_waypoints_in_current_horizon(self, t: float) -> np.ndarray:
-        """Extract waypoints in current horizon.
-
-        Args:
-            t: Current time
-
-        Returns:
-            Filtered waypoints matrix containing only waypoints within current horizon
-        """
-        # Copy the waypoints
-        rounded_waypoints = self.waypoints.copy()
-
-        # Round first column to nearest discrete time step relative to current time
-        rounded_waypoints[:, 0] = np.round(
-            (rounded_waypoints[:, 0] - t) / (1 / self.mpc_config.mpc_freq)
-        )
-
-        # Find time steps with waypoints within current horizon
-        # Smallest allowed step is 1 since input can't affect initial state
-        rows_in_horizon = []
-        for i in range(rounded_waypoints.shape[0]):
-            if rounded_waypoints[i, 0] >= 1 and rounded_waypoints[i, 0] <= self.mpc_config.K:
-                rows_in_horizon.append(i)
-
-        if not rows_in_horizon:
-            raise RuntimeError(
-                "Error: no waypoints within current horizon. Either increase horizon length or add waypoints."
-            )
-
-        # Create matrix with filtered waypoints
-        filtered_waypoints = rounded_waypoints[rows_in_horizon]
-
-        return filtered_waypoints
 
     def pre_solve(self, args: dict) -> None:
         """Setup optimization problem before solving.
@@ -144,72 +96,57 @@ class Drone(AMSolver):
         args = DroneSolveArgs(**args)
         # Extract waypoints in current horizon. Each row is a waypoint of form:
         # [k, x, y, z, vx, vy, vz, ax, ay, az]. k is discrete STEP in current horizon
-        extracted_waypoints = self.extract_waypoints_in_current_horizon(args.current_time)
+        mask, steps = filter_horizon(
+            self.waypoints["time"], args.current_time, self.mpc_config.K, self.mpc_config.mpc_freq
+        )
 
         # Separate and reshape waypoints into position, velocity, and acceleration vectors
-        n = extracted_waypoints.shape[0]
-        extracted_waypoints_pos = np.zeros(3 * n)
-        extracted_waypoints_vel = np.zeros(3 * n)
-        extracted_waypoints_acc = np.zeros(3 * n)
+        des_pos = self.waypoints["pos"][mask].flatten()
+        des_vel = self.waypoints["vel"][mask].flatten()
+        des_acc = self.waypoints["acc"][mask].flatten()
 
-        for i in range(n):
-            for j in range(3):
-                extracted_waypoints_pos[i * 3 + j] = extracted_waypoints[i, 1 + j]
-                extracted_waypoints_vel[i * 3 + j] = extracted_waypoints[i, 4 + j]
-                extracted_waypoints_acc[i * 3 + j] = extracted_waypoints[i, 7 + j]
-
-        # Extract penalized steps from first column of extracted_waypoints
+        # Extract penalized steps from first column of waypoints
         # First possible penalized step is 1, NOT 0 (input cannot affect initial state)
-        penalized_steps = extracted_waypoints[:, 0]
-
         # Create matrix that selects timesteps corresponding to waypoints
-        M_waypoints = np.zeros((3 * len(penalized_steps), 3 * (self.mpc_config.K + 1)))
+        M_waypoints = np.zeros((3 * len(steps), 3 * (self.mpc_config.K + 1)))
         eye3 = np.eye(3)
-        for i in range(len(penalized_steps)):
-            M_waypoints[
-                3 * i : 3 * (i + 1), 3 * int(penalized_steps[i]) : 3 * int(penalized_steps[i]) + 3
-            ] = eye3
-
+        for i in range(len(steps)):
+            M_waypoints[3 * i : 3 * (i + 1), 3 * int(steps[i]) : 3 * int(steps[i]) + 3] = eye3
+        # Plot the waypoint selection matrix
         # Output smoothness cost
         self.linear_cost += self.linear_cost_smoothness_const_term @ args.x_0
 
         # --- Add constraints - see thesis document for derivations ---
         # Waypoint position cost and/or equality constraint
         G_wp = M_waypoints @ self.M_p_S_u_W_input
-        h_wp = extracted_waypoints_pos - M_waypoints @ self.M_p_S_x @ args.x_0
+        h_wp = des_pos - M_waypoints @ self.M_p_S_x @ args.x_0
         self.quad_cost += 2 * self.weights.waypoints_pos * G_wp.T @ G_wp
         self.linear_cost += -2 * self.weights.waypoints_pos * G_wp.T @ h_wp
-        if args.constraint_config.enable_waypoints_pos_constraint:
-            self.add_constraint(
-                EqualityConstraint(G_wp, h_wp, self.mpc_config.waypoints_pos_tol), False
-            )
+        if args.constraint_config.waypoints_pos:
+            self.add_constraint(EqualityConstraint(G_wp, h_wp, self.mpc_config.waypoints_pos_tol))
 
         # Waypoint velocity cost and/or equality constraint
         G_wv = M_waypoints @ self.M_v_S_u_W_input
-        h_wv = extracted_waypoints_vel - M_waypoints @ self.M_v_S_x @ args.x_0
+        h_wv = des_vel - M_waypoints @ self.M_v_S_x @ args.x_0
         self.quad_cost += 2 * self.weights.waypoints_vel * G_wv.T @ G_wv
         self.linear_cost += -2 * self.weights.waypoints_vel * G_wv.T @ h_wv
-        if args.constraint_config.enable_waypoints_vel_constraint:
-            self.add_constraint(
-                EqualityConstraint(G_wv, h_wv, self.mpc_config.waypoints_vel_tol), False
-            )
+        if args.constraint_config.waypoints_vel:
+            self.add_constraint(EqualityConstraint(G_wv, h_wv, self.mpc_config.waypoints_vel_tol))
 
         # Waypoint acceleration cost and/or equality constraint
         G_wa = M_waypoints @ self.M_a_S_u_prime_W_input
-        h_wa = extracted_waypoints_acc - M_waypoints @ self.M_a_S_x_prime @ args.x_0
+        h_wa = des_acc - M_waypoints @ self.M_a_S_x_prime @ args.x_0
         self.quad_cost += 2 * self.weights.waypoints_acc * G_wa.T @ G_wa
         self.linear_cost += -2 * self.weights.waypoints_acc * G_wa.T @ h_wa
-        if args.constraint_config.enable_waypoints_acc_constraint:
-            self.add_constraint(
-                EqualityConstraint(G_wa, h_wa, self.mpc_config.waypoints_acc_tol), False
-            )
+        if args.constraint_config.waypoints_acc:
+            self.add_constraint(EqualityConstraint(G_wa, h_wa, self.mpc_config.waypoints_acc_tol))
 
         # Input continuity cost and/or equality constraint
         h_u = np.concatenate([args.u_0, args.u_dot_0, args.u_ddot_0])
-        self.linear_cost += -2 * self.weights.input_continuity * self.G_u_T @ h_u
-        if args.constraint_config.enable_input_continuity_constraint:
+        self.linear_cost += -2 * self.weights.input_continuity * self.G_u.T @ h_u
+        if args.constraint_config.input_continuity:
             self.add_constraint(
-                EqualityConstraint(self.G_u, h_u, self.mpc_config.input_continuity_tol), False
+                EqualityConstraint(self.G_u, h_u, self.mpc_config.input_continuity_tol)
             )
 
         # Position constraint
@@ -219,7 +156,7 @@ class Drone(AMSolver):
                 -np.tile(self.limits.p_min, self.mpc_config.K + 1) + self.M_p_S_x @ args.x_0,
             ]
         )
-        self.add_constraint(InequalityConstraint(self.G_p, h_p, self.mpc_config.pos_tol), False)
+        self.add_constraint(InequalityConstraint(self.G_p, h_p, self.mpc_config.pos_tol))
 
         # Velocity constraint
         c_v = self.M_v_S_x @ args.x_0
@@ -231,8 +168,7 @@ class Drone(AMSolver):
                 self.limits.v_bar,
                 1.0,
                 self.mpc_config.vel_tol,
-            ),
-            False,
+            )
         )
 
         # Acceleration constraint
@@ -245,8 +181,7 @@ class Drone(AMSolver):
                 self.limits.a_bar,
                 1.0,
                 self.mpc_config.acc_tol,
-            ),
-            False,
+            )
         )
 
         # Collision constraints
@@ -263,8 +198,7 @@ class Drone(AMSolver):
                     float("inf"),
                     self.mpc_config.bf_gamma,
                     self.mpc_config.collision_tol,
-                ),
-                False,
+                )
             )
 
     def post_solve(self, zeta: np.ndarray, args: DroneSolveArgs) -> DroneResult:
@@ -284,12 +218,14 @@ class Drone(AMSolver):
             DroneResult containing optimized trajectories
         """
         args = DroneSolveArgs(**args)
-        # Get state trajectory vector from spline coefficients, reshape into matrix where each row is state at a time step
+        # Get state trajectory vector from spline coefficients, reshape into matrix where each row
+        # is state at a time step
         state_trajectory_vector = self.S_x @ args.x_0 + self.S_u_W_input @ zeta
         state_trajectory = state_trajectory_vector.reshape((6, self.mpc_config.K + 1)).T
 
         # Extract position trajectory from state trajectory
-        position_trajectory_vector = self.selection_mats.M_p @ state_trajectory_vector
+        p_idx = np.arange((self.mpc_config.K + 1) * 6).reshape(-1, 6)[..., :3].flatten()
+        position_trajectory_vector = state_trajectory_vector[p_idx]
         position_trajectory = position_trajectory_vector.reshape((3, self.mpc_config.K + 1)).T
 
         # Get input position reference from spline coefficients
@@ -328,6 +264,106 @@ class Drone(AMSolver):
 
         return drone_result
 
+    def actual_solve(self, args) -> tuple[bool, int, np.ndarray]:
+        """Conducts actual solving process implementing optimization algorithm.
+
+        Not meant to be overridden by child classes.
+        """
+        # Initialize solver components
+        iters = 0
+        rho = self.solver_config.rho_init
+
+        # Initialize optimization variables and matrices
+        Q = np.zeros_like(self.quad_cost)  # Combined quadratic terms
+        q = np.zeros(self.quad_cost.shape[0])  # Combined linear terms
+        x = np.zeros(self.quad_cost.shape[0])  # Optimization variable
+        bregman_mult = np.zeros(self.quad_cost.shape[0])  # Bregman multiplier
+
+        # Aggregate quadratic and linear terms from all constraints
+        quad_constraint_terms = np.zeros_like(self.quad_cost)
+        linear_constraint_terms = np.zeros(self.linear_cost.shape[0])
+
+        for constraint in self.constraints:
+            quad_constraint_terms += constraint.get_quadratic_term()
+            linear_constraint_terms += constraint.get_linear_term()
+
+        # Plot heatmaps of Q matrices side by side
+
+        # Iteratively solve until solution found or max iterations reached
+        while iters < self.solver_config.max_iters:
+            Q = self.quad_cost + rho * quad_constraint_terms
+
+            # Construct linear cost matrices
+            linear_constraint_terms -= bregman_mult
+            q = self.linear_cost + rho * linear_constraint_terms
+
+            # Solve the QP
+            x = np.linalg.solve(Q, -q)
+
+            # Update constraints
+            self.update_constraints(x)
+
+            # Check if all constraints are satisfied
+            all_constraints_satisfied = all(
+                constraint.is_satisfied(x) for constraint in self.constraints
+            )
+
+            if all_constraints_satisfied:
+                return True, iters, x  # Exit loop, indicate success
+
+            # Recalculate linear term for Bregman multiplier
+            linear_constraint_terms[...] = 0
+            for constraint in self.constraints:
+                linear_constraint_terms += constraint.get_linear_term()
+
+            # Calculate Bregman multiplier
+            bregman_update = 0.5 * (quad_constraint_terms @ x + linear_constraint_terms)
+            bregman_mult -= bregman_update
+
+            # Gradually increase penalty parameter
+            rho *= self.solver_config.rho_init
+            rho = min(rho, self.solver_config.max_rho)
+            iters += 1
+
+        return False, iters, x  # Indicate failure but still return vector
+
+    def solve(self, args) -> tuple[bool, int, any]:
+        """Main solve function to be called by user.
+
+        Contains main solving workflow (pre_solve, actual_solve, post_solve).
+        Not meant to be overridden.
+        """
+        # Reset cost and clear carryover constraints from previous solves
+        self.reset_cost_matrices()
+        self.constraints.clear()
+        # Build new constraints and add to cost matrices
+        self.pre_solve(args)
+        # Ensure no carryover updates from previous solve
+        self.reset_constraints()
+        # Execute solve process to get raw solution vector
+        success, iters, result = self.actual_solve(args)
+        # Post-process solution according to derived class implementation
+        return success, iters, self.post_solve(result, args)
+
+    def reset_cost_matrices(self) -> None:
+        """Resets cost matrices to initial values"""
+        self.quad_cost = self.initial_quad_cost
+        self.linear_cost = self.initial_linear_cost
+
+    def add_constraint(self, constraint: Constraint) -> None:
+        """Adds a constraint to the solver"""
+        self.constraints.append(constraint)
+
+    def update_constraints(self, x: np.ndarray) -> None:
+        """Updates all non-constant constraints based on current optimization variables"""
+        for constraint in self.constraints:
+            constraint.update(x)
+
+    def reset_constraints(self) -> None:
+        """Resets constraints to initial state"""
+        for constraint in self.constraints:
+            constraint.reset()
+
     def init_bernstein_matrices(
         self, mpc_config: MPCConfig
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -360,7 +396,7 @@ class Drone(AMSolver):
                 # Position basis
                 val = (
                     (t**m)
-                    * nchoosek(mpc_config.n, m)
+                    * comb(mpc_config.n, m, exact=True)
                     * (t_f_minus_t ** (mpc_config.n - m))
                     / t_pow_n
                 )
@@ -373,7 +409,7 @@ class Drone(AMSolver):
                 else:
                     dot_val = (
                         (t_f ** (-mpc_config.n))
-                        * nchoosek(mpc_config.n, m)
+                        * comb(mpc_config.n, m, exact=True)
                         * (
                             m * (t ** (m - 1)) * (t_f_minus_t ** (mpc_config.n - m))
                             - (t**m) * (mpc_config.n - m) * (t_f_minus_t ** (mpc_config.n - m - 1))
@@ -392,7 +428,7 @@ class Drone(AMSolver):
                 else:
                     dotdot_val = (
                         (t_f**-mpc_config.n)
-                        * nchoosek(mpc_config.n, m)
+                        * comb(mpc_config.n, m, exact=True)
                         * (
                             m * (m - 1) * (t ** (m - 2)) * (t_f_minus_t ** (mpc_config.n - m))
                             - 2
@@ -508,7 +544,7 @@ class DroneResult:
     spline_coeffs: np.ndarray  # Spline coefficients for input parameterization
 
     @staticmethod
-    def generate_initial_drone_result(initial_position: np.ndarray, K: int) -> "DroneResult":
+    def generate_initial_drone_result(initial_position: np.ndarray, K: int) -> DroneResult:
         """Generate initial DroneResult with stationary trajectories at initial position"""
         # Generate state trajectory by appending zero velocity to initial position and replicating
         initial_state = np.zeros(6)
@@ -576,18 +612,18 @@ class DroneResult:
 class ConstraintConfig:
     """Configuration for optimization constraints"""
 
-    enable_waypoints_pos_constraint: bool = True
-    enable_waypoints_vel_constraint: bool = True
-    enable_waypoints_acc_constraint: bool = True
-    enable_input_continuity_constraint: bool = True
+    waypoints_pos: bool = True
+    waypoints_vel: bool = True
+    waypoints_acc: bool = True
+    input_continuity: bool = True
 
     def set_waypoints_constraints(self, pos: bool, vel: bool, acc: bool):
-        self.enable_waypoints_pos_constraint = pos
-        self.enable_waypoints_vel_constraint = vel
-        self.enable_waypoints_acc_constraint = acc
+        self.waypoints_pos = pos
+        self.waypoints_vel = vel
+        self.waypoints_acc = acc
 
     def set_input_continuity_constraints(self, flag: bool):
-        self.enable_input_continuity_constraint = flag
+        self.input_continuity = flag
 
 
 @dataclass
@@ -671,25 +707,34 @@ class DroneSolveArgs:
 
 
 @dataclass
-class SelectionMatrices:
-    """Selection matrices for extracting position, velocity and acceleration components"""
+class AMSolverConfig:
+    """Configuration settings for the AMSolver"""
 
-    M_p: np.ndarray  # Position selection matrix
-    M_v: np.ndarray  # Velocity selection matrix
-    M_a: np.ndarray  # Acceleration selection matrix
+    rho_init: float  # Initial value of rho
+    max_rho: float  # Maximum allowable value of rho
+    max_iters: int  # Maximum number of iterations
 
-    def __init__(self, K: int):
-        """Initialize selection matrices based on horizon length.
 
-        Args:
-            K: Number of timesteps in horizon
-        """
-        # Create intermediate matrices
-        eye3 = np.eye(3)
-        eye_kplus1 = np.eye(K + 1)
-        zero_mat = np.zeros((3, 3))
+def filter_horizon(times: NDArray, t: float, K: int, mpc_freq: float) -> tuple[NDArray, NDArray]:
+    """Extract waypoints in current horizon.
 
-        # Build selection matrices using Kronecker products
-        self.M_p = np.kron(eye_kplus1, np.hstack((eye3, zero_mat)))
-        self.M_v = np.kron(eye_kplus1, np.hstack((zero_mat, eye3)))
-        self.M_a = np.kron(eye_kplus1, np.hstack((zero_mat, eye3)))
+    Args:
+        waypoints: Waypoints matrix
+        t: Current time
+        K: Horizon length
+        mpc_freq: MPC frequency
+
+    Returns:
+        Filtered waypoints matrix containing only waypoints within current horizon
+    """
+    assert isinstance(times, np.ndarray), "Waypoints must be a numpy array"
+    assert times.ndim == 1, "Waypoints must be a 2D array"
+    # Round times to nearest discrete time step relative to current time
+    rounded_times = np.round((times - t) * mpc_freq)
+    # Find time steps with waypoints within current horizon
+    in_horizon = np.where((rounded_times > 0) & (rounded_times <= K))[0]
+    if len(in_horizon) == 0:
+        raise RuntimeError(
+            "Error: no waypoints within current horizon. Increase horizon or add waypoints."
+        )
+    return in_horizon, rounded_times[in_horizon]

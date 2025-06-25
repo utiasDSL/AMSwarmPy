@@ -32,7 +32,9 @@ requires-python = ">=3.8"
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-select = ["E", "F", "B", "I", "N", "UP", "PL", "RUF"]
+select = ["E", "F", "B", "I", "N", "UP", "RUF"]
+ignore = ["N803", "N806"]
+
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
@@ -48,3 +50,5 @@ numpy = ">=2.3.0,<3"
 matplotlib = ">=3.10.3,<4"
 pyyaml = ">=6.0.2,<7"
 scipy = ">=1.15.2,<2"
+fire = ">=0.7.0,<0.8"
+pulp = ">=2.8.0,<3"

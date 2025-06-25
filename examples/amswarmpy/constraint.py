@@ -1,7 +1,6 @@
-import numpy as np
-
-
 from typing import Protocol
+
+import numpy as np
 
 
 class Constraint(Protocol):

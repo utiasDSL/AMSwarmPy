@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import amswarm
 import amswarmpy
+import fire
 import matplotlib.pyplot as plt
-import mujoco
 import numpy as np
 import yaml
 from crazyflow import Sim
-from scipy.spatial.transform import Rotation as R
+from utils import draw_line, draw_points
 
 if TYPE_CHECKING:
     from crazyflow import Sim
@@ -29,16 +30,18 @@ def render_solutions(sim, drone_results):
 
 
 def generate_waypoints(n_drones: int, n_points: int = 4, duration_sec: float = 10.0):
+    """Waypoints have the following shape: [T, n_drones, 3]."""
     radius = 0.75
-    phase = np.linspace(0, 2 * (1 - 1 / n_drones) * np.pi, n_drones)[:, None]
-    t = np.linspace(0, duration_sec, n_points)
+    phase = np.linspace(0, 2 * (1 - 1 / n_drones) * np.pi, n_drones)
+    t = np.tile(np.linspace(0, duration_sec, n_points), (n_drones, 1)).T
     x = np.cos(0.1 * t * np.pi + phase) * radius
     y = np.sin(0.1 * t * np.pi + phase) * radius
-    z = np.ones_like(x) * np.linspace(0.5, 1.5, n_points)
-    t = np.repeat(t[None, :], n_drones, axis=0)
-    wpt = np.stack([t, x, y, z], axis=-1)
-    wpt = np.concat([wpt, np.zeros((n_drones, n_points, 6))], axis=-1)
-    return {i: wpt[i] for i in range(n_drones)}
+    z = np.ones_like(x) * np.linspace(0.5, 1.5, n_points)[:, None]
+    pos = np.stack([x, y, z], axis=-1)
+    vel = np.zeros_like(pos)
+    acc = np.zeros_like(pos)
+    assert pos.shape == (n_points, n_drones, 3), f"Shape {pos.shape} != ({n_points}, {n_drones}, 3)"
+    return {"time": t, "pos": pos, "vel": vel, "acc": acc}
 
 
 def solve_swarm(swarm, current_time, initial_states, input_drone_results, constraint_configs):
@@ -56,18 +59,32 @@ def solve_swarm(swarm, current_time, initial_states, input_drone_results, constr
     solve_success, iters, drone_results = swarm.solve(
         current_time, initial_states, input_drone_results, constraint_configs
     )
-    if not solve_success:
+    if not solve_success.all():
         print("Warning: Solve failed")
     return drone_results
 
 
-def simulate_amswarm(sim, waypoints, render=False):
+def legacy_waypoints(waypoints):
+    """Convert waypoints to the legacy format."""
+    res = {}
+    n_drones = waypoints["pos"].shape[1]
+    t = waypoints["time"][:, None]
+    for i in range(n_drones):
+        res[i] = np.concat(
+            (t, waypoints["pos"][:, i], waypoints["vel"][:, i], waypoints["acc"][:, i]), axis=-1
+        )
+    return res
+
+
+def simulate_amswarm(sim, waypoints, render=False) -> NDArray:
     """Run the AMSwarm simulation and record timing for solve steps.
 
-    Returns a dict with 'positions', 'timestamps', and timing info.
+    Returns the simulated positions for each time step and drone.
     """
     with open(Path(__file__).resolve().parents[1] / "params/model_params.yaml") as f:
         settings = yaml.safe_load(f)
+
+    waypoints = legacy_waypoints(waypoints)
 
     num_drones = len(waypoints)
     initial_positions = {k: waypoints[k][0, 1:4] for k in waypoints}
@@ -78,10 +95,7 @@ def simulate_amswarm(sim, waypoints, render=False):
     num_steps = int(duration_sec * mpc_freq)
 
     # Initialize results storage
-    results = {
-        "positions": {i: [] for i in range(num_drones)},
-        "timestamps": np.linspace(0, duration_sec, num_steps),
-    }
+    simulated_pos = np.zeros((num_steps, num_drones, 3))
 
     drone_results = [
         amswarm.DroneResult.generateInitialDroneResult(
@@ -91,15 +105,18 @@ def simulate_amswarm(sim, waypoints, render=False):
     ]
 
     # Initialize drones and swarm
-    amswarm_kwargs = {
-        "solverConfig": amswarm.AMSolverConfig(**settings["AMSolverConfig"]),
-        "mpcConfig": amswarm.MPCConfig(**settings["MPCConfig"]),
-        "weights": amswarm.MPCWeights(**settings["MPCWeights"]),
-        "limits": amswarm.PhysicalLimits(**settings["PhysicalLimits"]),
-        "dynamics": amswarm.SparseDynamics(**settings["Dynamics"]),
-    }
 
-    drones = [amswarm.Drone(waypoints=waypoints[key], **amswarm_kwargs) for key in waypoints]
+    drones = [
+        amswarm.Drone(
+            waypoints=waypoints[key],
+            solverConfig=amswarm.AMSolverConfig(**settings["AMSolverConfig"]),
+            mpcConfig=amswarm.MPCConfig(**settings["MPCConfig"]),
+            weights=amswarm.MPCWeights(**settings["MPCWeights"]),
+            limits=amswarm.PhysicalLimits(**settings["PhysicalLimits"]),
+            dynamics=amswarm.SparseDynamics(**settings["Dynamics"]),
+        )
+        for key in waypoints
+    ]
     swarm = amswarm.Swarm(drones)
 
     # Set initial states
@@ -135,16 +152,13 @@ def simulate_amswarm(sim, waypoints, render=False):
                 draw_points(sim, waypoints[i][:, 1:4], rgba=rgbas[i], size=0.02)
             sim.render()
 
-        for i in range(num_drones):
-            current_positions[i] = np.asarray(sim.data.states.pos[0, i])
-            results["positions"][i].append(current_positions[i])
+        current_positions = np.asarray(sim.data.states.pos[0])
+        simulated_pos[step] = current_positions
 
-    return {
-        "positions": np.array([results["positions"][i] for i in range(num_drones)]),
-    }
+    return simulated_pos
 
 
-def simulate_amswarmpy(sim, waypoints, render=False):
+def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     """Run the AMSwarmPy simulation.
 
     Args:
@@ -158,54 +172,52 @@ def simulate_amswarmpy(sim, waypoints, render=False):
         settings = yaml.safe_load(f)
 
     num_drones = sim.n_drones
-    initial_positions = {k: waypoints[k][0, 1:4] for k in waypoints}
 
     # Setup simulation parameters
     mpc_freq = settings["MPCConfig"]["mpc_freq"]
-    duration_sec = waypoints[0][-1, 0]
+    duration_sec = waypoints["time"][-1, 0]
     num_steps = int(duration_sec * mpc_freq)
 
     # Initialize results storage
-    results = {
-        "positions": {i: [] for i in range(num_drones)},
-        "timestamps": np.linspace(0, duration_sec, num_steps),
-    }
+    simulated_pos = np.zeros((num_steps, num_drones, 3))
 
     drone_results = [
         amswarmpy.DroneResult.generate_initial_drone_result(
-            initial_positions[k], settings["MPCConfig"]["K"]
+            waypoints["pos"][k, 0], settings["MPCConfig"]["K"]
         )
-        for k in waypoints
+        for k in range(num_drones)
     ]
 
     # Initialize drones and swarm
-    amswarm_kwargs = {
-        "solver_config": amswarmpy.AMSolverConfig(**settings["AMSolverConfig"]),
-        "mpc_config": amswarmpy.MPCConfig(**settings["MPCConfig"]),
-        "weights": amswarmpy.MPCWeights(**settings["MPCWeights"]),
-        "limits": amswarmpy.PhysicalLimits(**settings["PhysicalLimits"]),
-        "dynamics": amswarmpy.SparseDynamics(**settings["Dynamics"]),
-    }
-
-    drones = [amswarmpy.Drone(waypoints=waypoints[key], **amswarm_kwargs) for key in waypoints]
+    drones = [
+        amswarmpy.Drone(
+            waypoints={k: v[:, i] for k, v in waypoints.items()},
+            solver_config=amswarmpy.AMSolverConfig(**settings["AMSolverConfig"]),
+            mpc_config=amswarmpy.MPCConfig(**settings["MPCConfig"]),
+            weights=amswarmpy.MPCWeights(**settings["MPCWeights"]),
+            limits=amswarmpy.PhysicalLimits(**settings["PhysicalLimits"]),
+            dynamics=amswarmpy.SparseDynamics(**settings["Dynamics"]),
+        )
+        for i in range(num_drones)
+    ]
     swarm = amswarmpy.Swarm(drones)
 
     # Set initial states
-    initial_states = [np.concatenate((initial_positions[k], [0, 0, 0])) for k in waypoints]
-    constraint_configs = [amswarmpy.ConstraintConfig() for k in waypoints]
+    initial_states = np.concat((waypoints["pos"][0], np.zeros((num_drones, 3))), axis=-1)
+    constraint_configs = [amswarmpy.ConstraintConfig() for k in range(num_drones)]
 
     drone_results = solve_swarm(swarm, 0, initial_states, drone_results, constraint_configs)
-    current_positions = {k: initial_positions[k] for k in waypoints}
+    current_positions = waypoints["pos"][0]
 
     sim.reset()
     # Set initial position states to first waypoint for each drone
-    pos = np.stack([waypoints[i][0, 1:4] for i in range(num_drones)], axis=0).reshape(1, -1, 3)
+    pos = waypoints["pos"][[0]]
     sim.data = sim.data.replace(states=sim.data.states.replace(pos=pos))
 
     for step in range(num_steps):
         current_time = step / mpc_freq
 
-        initial_states = [np.concatenate((current_positions[k], [0, 0, 0])) for k in waypoints]
+        initial_states = np.concat((current_positions, np.zeros((num_drones, 3))), axis=-1)
         drone_results = solve_swarm(
             swarm, current_time, initial_states, drone_results, constraint_configs
         )
@@ -220,26 +232,23 @@ def simulate_amswarmpy(sim, waypoints, render=False):
         if render:
             render_solutions(sim, drone_results)
             for i in range(num_drones):
-                draw_points(sim, waypoints[i][:, 1:4], rgba=rgbas[i], size=0.02)
+                draw_points(sim, waypoints["pos"][:, i, :], rgba=rgbas[i], size=0.02)
             sim.render()
 
-        for i in range(num_drones):
-            current_positions[i] = np.asarray(sim.data.states.pos[0, i])
-            results["positions"][i].append(current_positions[i])
+        current_positions = np.asarray(sim.data.states.pos[0])
+        simulated_pos[step] = current_positions
 
-    return {
-        "positions": np.array([results["positions"][i] for i in range(num_drones)]),
-    }
+    return simulated_pos
 
 
-def plot_trajectories(sim, waypoints, results_amswarm, results_amswarmpy):
+def plot_trajectories(sim, waypoints, pos_amswarm, pos_amswarmpy):
     """Plot comparison of trajectories between AMSwarm and AMSwarmPy implementations.
 
     Args:
         sim: Simulation object containing number of drones
         waypoints: Dictionary of waypoints for each drone
-        results_amswarm: Dictionary containing AMSwarm trajectory results
-        results_amswarmpy: Dictionary containing AMSwarmPy trajectory results
+        pos_amswarm: Dictionary containing AMSwarm trajectory results
+        pos_amswarmpy: Dictionary containing AMSwarmPy trajectory results
     """
 
     fig = plt.figure(figsize=(12, 8))
@@ -248,30 +257,20 @@ def plot_trajectories(sim, waypoints, results_amswarm, results_amswarmpy):
     # Plot each drone's trajectory
     for i in range(sim.n_drones):
         # Plot AMSwarm trajectory
-        if results_amswarm:
-            ax.plot(
-                results_amswarm["positions"][i][:, 0],
-                results_amswarm["positions"][i][:, 1],
-                results_amswarm["positions"][i][:, 2],
-                label=f"AMSwarm Drone {i}",
-                color=rgbas[i],
-            )
+        if pos_amswarm is not None:
+            pos = pos_amswarm[:, i, :]
+            ax.plot(pos[:, 0], pos[:, 1], pos[:, 2], label=f"AMSwarm Drone {i}", color=rgbas[i])
 
         # Plot AMSwarmPy trajectory
-        if results_amswarmpy:
+        if pos_amswarmpy is not None:
+            pos = pos_amswarmpy[:, i, :]
             ax.plot(
-                results_amswarmpy["positions"][i][:, 0],
-                results_amswarmpy["positions"][i][:, 1],
-                results_amswarmpy["positions"][i][:, 2],
-                "--",
-                label=f"AMSwarmPy Drone {i}",
-                color=rgbas[i],
+                pos[:, 0], pos[:, 1], pos[:, 2], "--", label=f"AMSwarmPy Drone {i}", color=rgbas[i]
             )
 
         # Plot waypoints
-        ax.scatter(
-            waypoints[i][:, 1], waypoints[i][:, 2], waypoints[i][:, 3], marker="x", color=rgbas[i]
-        )
+        pos = waypoints["pos"][:, i, :]
+        ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], marker="x", color=rgbas[i])
 
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
@@ -281,100 +280,23 @@ def plot_trajectories(sim, waypoints, results_amswarm, results_amswarmpy):
     plt.show()
 
 
-def draw_line(
-    sim: Sim,
-    points: NDArray,
-    rgba: NDArray | None = None,
-    min_size: float = 3.0,
-    max_size: float = 3.0,
-):
-    """Draw a line into the simulation.
-
-    Args:
-        sim: The crazyflow simulation.
-        points: An array of [N, 3] points that make up the line.
-        rgba: The color of the line.
-        min_size: The minimum line size. We linearly interpolate the size from min_size to max_size.
-        max_size: The maximum line size.
-
-    Note:
-        This function has to be called every time before the env.render() step.
-    """
-    assert points.ndim == 2, f"Expected array of [N, 3] points, got Array of shape {points.shape}"
-    assert points.shape[-1] == 3, f"Points must be 3D, are {points.shape[-1]}"
-    if sim.viewer is None:  # Do not attempt to add markers if viewer is still None
-        return
-    if sim.max_visual_geom < points.shape[0]:
-        raise RuntimeError("Attempted to draw too many lines. Try to increase Sim.max_visual_geom")
-    viewer = sim.viewer.viewer
-    sizes = np.zeros_like(points)[:-1, :]
-    sizes[:, 2] = np.linalg.norm(points[1:] - points[:-1], axis=-1)
-    sizes[:, :2] = np.linspace(min_size, max_size, len(sizes))[..., None]
-    if rgba is None:
-        rgba = np.array([1.0, 0, 0, 1])
-    if np.any(np.isnan(points)):
-        return
-    mats = _rotation_matrix_from_points(points[:-1], points[1:]).as_matrix().reshape(-1, 9)
-    for i in range(len(points) - 1):
-        viewer.add_marker(
-            type=mujoco.mjtGeom.mjGEOM_LINE, size=sizes[i], pos=points[i], mat=mats[i], rgba=rgba
-        )
-
-
-def draw_points(sim: Sim, points: NDArray, rgba: NDArray | None = None, size: float = 3.0):
-    """Draw points into the simulation.
-
-    Args:
-        sim: The crazyflow simulation.
-        points: An array of [N, 3] points.
-        rgba: The color of the line.
-        size: The size of points.
-
-    Note:
-        This function has to be called every time before the env.render() step.
-    """
-    assert points.ndim == 2, f"Expected array of [N, 3] points, got Array of shape {points.shape}"
-    assert points.shape[-1] == 3, f"Points must be 3D, are {points.shape[-1]}"
-    if sim.viewer is None:  # Do not attempt to add markers if viewer is still None
-        return
-    if sim.max_visual_geom < points.shape[0]:
-        raise RuntimeError("Attempted to draw too many points. Try to increase Sim.max_visual_geom")
-    viewer = sim.viewer.viewer
-    size = np.ones(3) * size
-    if rgba is None:
-        rgba = np.array([1.0, 0, 0, 1])
-    mats = np.eye(3).flatten()
-    for i in range(len(points) - 1):
-        viewer.add_marker(
-            type=mujoco.mjtGeom.mjGEOM_SPHERE, size=size, pos=points[i], mat=mats, rgba=rgba
-        )
-
-
-def _rotation_matrix_from_points(p1: NDArray, p2: NDArray) -> R:
-    """Generate rotation matrices that align their z-axis to p2-p1."""
-    v = p2 - p1
-    vnorm = np.linalg.norm(p2 - p1, axis=-1, keepdims=True)
-    # print(p1.shape, vnorm.shape)
-    # <add eps to points that are identical to avoid singularity issues
-    p1 = np.where(vnorm < 1e-6, p1 + 1e-4, p1)
-    z_axis = (v := p2 - p1) / np.linalg.norm(v, axis=-1, keepdims=True)
-    random_vector = np.random.rand(*z_axis.shape)
-    x_axis = (v := np.cross(random_vector, z_axis)) / np.linalg.norm(v, axis=-1, keepdims=True)
-    y_axis = np.cross(z_axis, x_axis)
-    return R.from_matrix(np.stack((x_axis, y_axis, z_axis), axis=-1))
-
-
-def main():
+def main(render: bool = False):
     sim = Sim(n_drones=5, freq=400, state_freq=80, attitude_freq=400, control="state")
     n_points = 7
     waypoints = generate_waypoints(sim.n_drones, n_points=n_points)
 
-    results_amswarm = simulate_amswarm(sim, waypoints, render=True)
-    results_amswarmpy = simulate_amswarmpy(sim, waypoints, render=True)
+    results_amswarm = None
+    # results_amswarm = simulate_amswarm(sim, waypoints, render=render)
+    tstart = time.perf_counter()
+    results_amswarmpy = None
+    results_amswarmpy = simulate_amswarmpy(sim, waypoints, render=render)
+    tstop = time.perf_counter()
+    print(f"AMSwarmPy time: {tstop - tstart:.2f} seconds")
+    # Solve time v00: 20s
     sim.close()
 
     plot_trajectories(sim, waypoints, results_amswarm, results_amswarmpy)
 
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(main)

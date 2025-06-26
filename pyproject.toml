@@ -26,8 +26,8 @@ classifiers = [
     "Intended Audience :: Science/Research",
 ]
 keywords = ["drones", "control", "swarm", "path planning"]
-dependencies = []
 requires-python = ">=3.8"
+dependencies = ["crazyflow[gpu]>=0.0.1,<0.0.2"]
 
 [tool.ruff]
 line-length = 100
@@ -52,3 +52,4 @@ pyyaml = ">=6.0.2,<7"
 scipy = ">=1.15.2,<2"
 fire = ">=0.7.0,<0.8"
 pulp = ">=2.8.0,<3"
+

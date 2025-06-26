@@ -59,7 +59,7 @@ def solve_swarm(swarm, current_time, initial_states, input_drone_results, constr
     solve_success, iters, drone_results = swarm.solve(
         current_time, initial_states, input_drone_results, constraint_configs
     )
-    if not solve_success.all():
+    if not all(solve_success):
         print("Warning: Solve failed")
     return drone_results
 
@@ -68,10 +68,11 @@ def legacy_waypoints(waypoints):
     """Convert waypoints to the legacy format."""
     res = {}
     n_drones = waypoints["pos"].shape[1]
-    t = waypoints["time"][:, None]
+    t = waypoints["time"]
     for i in range(n_drones):
         res[i] = np.concat(
-            (t, waypoints["pos"][:, i], waypoints["vel"][:, i], waypoints["acc"][:, i]), axis=-1
+            (t[:, i, None], waypoints["pos"][:, i], waypoints["vel"][:, i], waypoints["acc"][:, i]),
+            axis=-1,
         )
     return res
 

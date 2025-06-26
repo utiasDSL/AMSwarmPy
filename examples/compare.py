@@ -22,11 +22,10 @@ rgbas = np.random.rand(5, 4)
 rgbas[..., 3] = 1.0
 
 
-def render_solutions(sim, drone_results):
-    for i, result in enumerate(drone_results):
-        points = result.position_trajectory
-        draw_points(sim, points, rgba=rgbas[i], size=0.01)
-        draw_line(sim, points, rgba=rgbas[i])
+def render_solutions(sim, trajectories: list[np.ndarray]):
+    for i, trajectory in enumerate(trajectories):
+        draw_points(sim, trajectory, rgba=rgbas[i], size=0.01)
+        draw_line(sim, trajectory, rgba=rgbas[i])
 
 
 def generate_waypoints(n_drones: int, n_points: int = 4, duration_sec: float = 10.0):
@@ -148,7 +147,7 @@ def simulate_amswarm(sim, waypoints, render=False) -> NDArray:
         sim.state_control(control)
         sim.step(sim.freq // mpc_freq)
         if render:
-            render_solutions(sim, drone_results)
+            render_solutions(sim, [r.position_trajectory for r in drone_results])
             for i in range(num_drones):
                 draw_points(sim, waypoints[i][:, 1:4], rgba=rgbas[i], size=0.02)
             sim.render()
@@ -224,14 +223,14 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         )
         for result in drone_results:
             result.advance_for_next_solve_step()
-        control = np.stack([r.position_trajectory[1] for r in drone_results], axis=0)
+        control = np.stack([r.positions[1] for r in drone_results], axis=0)
         control = np.concat([control, np.zeros((control.shape[0], 10))], axis=-1)
         control = control[None, ...]
 
         sim.state_control(control)
         sim.step(sim.freq // mpc_freq)
         if render:
-            render_solutions(sim, drone_results)
+            render_solutions(sim, [r.positions for r in drone_results])
             for i in range(num_drones):
                 draw_points(sim, waypoints["pos"][:, i, :], rgba=rgbas[i], size=0.02)
             sim.render()

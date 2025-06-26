@@ -88,14 +88,12 @@ class Swarm:
             for avoid_drone in self.avoidance_map[i]:
                 # Time taken: 5.00e-05 seconds
                 intersect = check_intersection(
-                    previous_results[i].position_trajectory,
-                    previous_results[avoid_drone].position_trajectory,
+                    previous_results[i].positions,
+                    previous_results[avoid_drone].positions,
                     self._reduced_collision_envelopes[avoid_drone],
                 )
                 if intersect:
-                    obstacle_positions.append(
-                        previous_results[avoid_drone].position_trajectory.flatten()
-                    )
+                    obstacle_positions.append(previous_results[avoid_drone].positions.flatten())
                     obstacle_envelopes.append(self.all_obstacle_envelopes[avoid_drone])
                     num_obstacles += 1
 
@@ -106,9 +104,9 @@ class Swarm:
                 "obstacle_positions": obstacle_positions,
                 "obstacle_envelopes": obstacle_envelopes,
                 "x_0": initial_states[i],
-                "u_0": previous_results[i].input_position_trajectory[0],
-                "u_dot_0": previous_results[i].input_velocity_trajectory[0],
-                "u_ddot_0": previous_results[i].input_acceleration_trajectory[0],
+                "u_0": previous_results[i].input_positions[0],
+                "u_dot_0": previous_results[i].input_velocities[0],
+                "u_ddot_0": previous_results[i].input_accelerations[0],
                 "constraint_config": constraint_configs[i],
             }
 

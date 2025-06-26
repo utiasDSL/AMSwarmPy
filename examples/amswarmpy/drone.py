@@ -218,51 +218,23 @@ class Drone:
             DroneResult containing optimized trajectories
         """
         args = DroneSolveArgs(**args)
-        # Get state trajectory vector from spline coefficients, reshape into matrix where each row
-        # is state at a time step
-        state_trajectory_vector = self.S_x @ args.x_0 + self.S_u_W_input @ zeta
-        state_trajectory = state_trajectory_vector.reshape((6, self.mpc_config.K + 1)).T
 
         # Extract position trajectory from state trajectory
-        p_idx = np.arange((self.mpc_config.K + 1) * 6).reshape(-1, 6)[..., :3].flatten()
-        position_trajectory_vector = state_trajectory_vector[p_idx]
-        position_trajectory = position_trajectory_vector.reshape((3, self.mpc_config.K + 1)).T
+        states_vector = self.S_x @ args.x_0 + self.S_u_W_input @ zeta
+        positions = states_vector.T.reshape((self.mpc_config.K + 1, 6))[:, :3]
 
-        # Get input position reference from spline coefficients
-        input_position_trajectory_vector = self.W @ zeta
-        input_position_trajectory = (
-            input_position_trajectory_vector.reshape((3, self.mpc_config.K))
-        ).T
+        # Get input position, velocity and acceleration from spline coefficients
+        input_positions = (self.W @ zeta).T.reshape((self.mpc_config.K, 3))
+        input_velocities = (self.W_dot @ zeta).T.reshape((self.mpc_config.K, 3))
+        input_accelerations = (self.W_ddot @ zeta).T.reshape(self.mpc_config.K, 3)
 
-        # Get input velocity reference from spline coefficients
-        input_velocity_trajectory_vector = self.W_dot @ zeta
-        input_velocity_trajectory = (
-            input_velocity_trajectory_vector.reshape((3, self.mpc_config.K))
-        ).T
-
-        # Get input acceleration reference from spline coefficients
-        input_acceleration_trajectory_vector = self.W_ddot @ zeta
-        input_acceleration_trajectory = input_acceleration_trajectory_vector.reshape(
-            (3, self.mpc_config.K)
-        ).T
-
-        # Store spline coefficients directly from optimization results
-        spline_coeffs = zeta
-        drone_result = DroneResult(
-            position_trajectory=position_trajectory,
-            position_trajectory_vector=position_trajectory_vector,
-            state_trajectory=state_trajectory,
-            state_trajectory_vector=state_trajectory_vector,
-            input_position_trajectory=input_position_trajectory,
-            input_position_trajectory_vector=input_position_trajectory_vector,
-            input_velocity_trajectory=input_velocity_trajectory,
-            input_velocity_trajectory_vector=input_velocity_trajectory_vector,
-            input_acceleration_trajectory=input_acceleration_trajectory,
-            input_acceleration_trajectory_vector=input_acceleration_trajectory_vector,
-            spline_coeffs=spline_coeffs,
+        return DroneResult(
+            positions=positions,
+            input_positions=input_positions,
+            input_velocities=input_velocities,
+            input_accelerations=input_accelerations,
+            spline_coeffs=zeta,
         )
-
-        return drone_result
 
     def actual_solve(self, args) -> tuple[bool, int, np.ndarray]:
         """Conducts actual solving process implementing optimization algorithm.
@@ -531,81 +503,39 @@ class Drone:
 class DroneResult:
     """Results from drone trajectory optimization"""
 
-    position_trajectory: np.ndarray  # K+1 x 3 matrix, each row is position at a timestep
-    position_trajectory_vector: np.ndarray  # 3(K+1) x 1 vector
-    state_trajectory: np.ndarray  # K+1 x 6 matrix, each row is [position, velocity]
-    state_trajectory_vector: np.ndarray  # 6(K+1) x 1 vector
-    input_position_trajectory: np.ndarray  # K x 3 matrix
-    input_position_trajectory_vector: np.ndarray  # 3K x 1 vector
-    input_velocity_trajectory: np.ndarray  # K x 3 matrix
-    input_velocity_trajectory_vector: np.ndarray  # 3K x 1 vector
-    input_acceleration_trajectory: np.ndarray  # K x 3 matrix
-    input_acceleration_trajectory_vector: np.ndarray  # 3K x 1 vector
+    positions: np.ndarray  # K+1 x 3 matrix, each row is position at a timestep
+    input_positions: np.ndarray  # K x 3 matrix
+    input_velocities: np.ndarray  # K x 3 matrix
+    input_accelerations: np.ndarray  # K x 3 matrix
     spline_coeffs: np.ndarray  # Spline coefficients for input parameterization
 
     @staticmethod
     def generate_initial_drone_result(initial_position: np.ndarray, K: int) -> DroneResult:
         """Generate initial DroneResult with stationary trajectories at initial position"""
-        # Generate state trajectory by appending zero velocity to initial position and replicating
-        initial_state = np.zeros(6)
-        initial_state[:3] = initial_position
-        state_trajectory_vector = np.tile(initial_state, K + 1)
-        state_trajectory = state_trajectory_vector.reshape(K + 1, 6)
-
         # Generate position trajectory by replicating initial position
-        position_trajectory_vector = np.tile(initial_position, K + 1)
-        position_trajectory = position_trajectory_vector.reshape(K + 1, 3)
-
-        # Generate input position trajectory by replicating initial position K times
-        input_position_trajectory_vector = np.tile(initial_position, K)
-        input_position_trajectory = input_position_trajectory_vector.reshape(K, 3)
-
-        # Generate input velocity trajectory by replicating zero K times
-        input_velocity_trajectory_vector = np.zeros(3 * K)
-        input_velocity_trajectory = input_velocity_trajectory_vector.reshape(K, 3)
-
-        # Generate input acceleration trajectory by replicating zero K times
-        input_acceleration_trajectory_vector = np.zeros(3 * K)
-        input_acceleration_trajectory = input_acceleration_trajectory_vector.reshape(K, 3)
+        positions = np.tile(initial_position, (K + 1, 1))
+        input_positions = np.tile(initial_position, (K, 1))
+        input_velocities = np.zeros((K, 3))
+        input_accelerations = np.zeros((K, 3))
 
         return DroneResult(
-            position_trajectory=position_trajectory,
-            position_trajectory_vector=position_trajectory_vector,
-            state_trajectory=state_trajectory,
-            state_trajectory_vector=state_trajectory_vector,
-            input_position_trajectory=input_position_trajectory,
-            input_position_trajectory_vector=input_position_trajectory_vector,
-            input_velocity_trajectory=input_velocity_trajectory,
-            input_velocity_trajectory_vector=input_velocity_trajectory_vector,
-            input_acceleration_trajectory=input_acceleration_trajectory,
-            input_acceleration_trajectory_vector=input_acceleration_trajectory_vector,
+            positions=positions,
+            input_positions=input_positions,
+            input_velocities=input_velocities,
+            input_accelerations=input_accelerations,
             spline_coeffs=None,
         )
 
     def advance_for_next_solve_step(self):
         """Advance trajectories by one step for next solve iteration"""
-        # Advance state and position trajectories
-        self.position_trajectory_vector[:-3] = self.position_trajectory_vector[3:]
         # Extrapolate last position by adding the difference between last two positions
-        extrapolated_position = self.position_trajectory_vector[-3:] + (
-            self.position_trajectory_vector[-3:] - self.position_trajectory_vector[-6:-3]
-        )
-        self.position_trajectory_vector[-3:] = extrapolated_position
-        self.position_trajectory = self.position_trajectory_vector.reshape(-1, 3)
-
+        extrapolated_position = 2 * self.positions[-1] - self.positions[-2]
+        self.positions[:-1] = self.positions[1:]
+        self.positions[-1] = extrapolated_position
         # Advance input trajectories - only shift values since we only check first row
-        self.input_position_trajectory_vector[:-3] = self.input_position_trajectory_vector[3:]
-        self.input_velocity_trajectory_vector[:-3] = self.input_velocity_trajectory_vector[3:]
-        self.input_acceleration_trajectory_vector[:-3] = self.input_acceleration_trajectory_vector[
-            3:
-        ]
-
-        # Reshape input trajectories
-        self.input_position_trajectory = self.input_position_trajectory_vector.reshape(-1, 3)
-        self.input_velocity_trajectory = self.input_velocity_trajectory_vector.reshape(-1, 3)
-        self.input_acceleration_trajectory = self.input_acceleration_trajectory_vector.reshape(
-            -1, 3
-        )
+        self.input_positions[:-1] = self.input_positions[1:]
+        self.input_velocities[:-1] = self.input_velocities[1:]
+        self.input_accelerations[:-1] = self.input_accelerations[1:]
 
 
 @dataclass

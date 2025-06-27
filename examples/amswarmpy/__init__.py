@@ -1,25 +1,25 @@
 from .drone import (
-    AMSolverConfig,
-    ConstraintConfig,
+    ConstraintSettings,
     Drone,
     DroneResult,
-    DroneSolveArgs,
-    MPCConfig,
-    MPCWeights,
-    PhysicalLimits,
+    Limits,
+    MPCSettings,
+    SolverData,
+    SolverSettings,
     SparseDynamics,
+    Weights,
 )
 from .swarm import Swarm
 
 __all__ = [
-    "AMSolverConfig",
-    "ConstraintConfig",
+    "ConstraintSettings",
     "Drone",
     "DroneResult",
-    "DroneSolveArgs",
-    "MPCConfig",
-    "MPCWeights",
-    "PhysicalLimits",
+    "Limits",
+    "MPCSettings",
+    "SolverData",
+    "SolverSettings",
     "SparseDynamics",
     "Swarm",
+    "Weights",
 ]

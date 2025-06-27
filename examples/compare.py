@@ -46,15 +46,12 @@ def generate_waypoints(n_drones: int, n_points: int = 4, duration_sec: float = 1
 def solve_swarm(swarm, current_time, initial_states, input_drone_results, constraint_configs):
     """Solve the optimization problem for the swarm."""
     for cfg in constraint_configs:
-        if hasattr(cfg, "setWaypointsConstraints"):
+        if isinstance(cfg, amswarm.ConstraintConfig):
             cfg.setWaypointsConstraints(True, False, False)
-        elif hasattr(cfg, "set_waypoints_constraints"):
-            cfg.set_waypoints_constraints(True, False, False)
         else:
             raise ValueError(
                 "Constraint config does not have setWaypointsConstraints or set_waypoints_constraints"
             )
-
     solve_success, iters, drone_results = swarm.solve(
         current_time, initial_states, input_drone_results, constraint_configs
     )
@@ -168,13 +165,13 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     Returns:
         Dictionary containing trajectory positions
     """
-    with open(Path(__file__).resolve().parents[1] / "params/model_params.yaml") as f:
+    with open(Path(__file__).resolve().parents[1] / "params/settings.yaml") as f:
         settings = yaml.safe_load(f)
 
     num_drones = sim.n_drones
 
     # Setup simulation parameters
-    mpc_freq = settings["MPCConfig"]["mpc_freq"]
+    mpc_freq = settings["MPCSettings"]["mpc_freq"]
     duration_sec = waypoints["time"][-1, 0]
     num_steps = int(duration_sec * mpc_freq)
 
@@ -183,30 +180,47 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
 
     drone_results = [
         amswarmpy.DroneResult.generate_initial_drone_result(
-            waypoints["pos"][k, 0], settings["MPCConfig"]["K"]
+            waypoints["pos"][k, 0], settings["MPCSettings"]["K"]
         )
         for k in range(num_drones)
     ]
 
     # Initialize drones and swarm
+    constraint_settings = amswarmpy.ConstraintSettings(
+        pos=True, vel=False, acc=False, input_continuity=True
+    )
+    weights = amswarmpy.Weights(**settings["Weights"])
+    limits = amswarmpy.Limits(**settings["Limits"])
+    mpc_settings = amswarmpy.MPCSettings(**settings["MPCSettings"])
+    solver_settings = amswarmpy.SolverSettings(
+        **settings["SolverSettings"],
+        constraints=constraint_settings,
+        weights=weights,
+        limits=limits,
+        mpc=mpc_settings,
+    )
+    solver_settings.constraints.pos = True
+    solver_settings.constraints.vel = False
+    solver_settings.constraints.acc = False
+    solver_settings.constraints.input_continuity = True
     drones = [
         amswarmpy.Drone(
+            settings=solver_settings,
             waypoints={k: v[:, i] for k, v in waypoints.items()},
-            solver_config=amswarmpy.AMSolverConfig(**settings["AMSolverConfig"]),
-            mpc_config=amswarmpy.MPCConfig(**settings["MPCConfig"]),
-            weights=amswarmpy.MPCWeights(**settings["MPCWeights"]),
-            limits=amswarmpy.PhysicalLimits(**settings["PhysicalLimits"]),
             dynamics=amswarmpy.SparseDynamics(**settings["Dynamics"]),
         )
         for i in range(num_drones)
     ]
-    swarm = amswarmpy.Swarm(drones)
+    swarm = amswarmpy.Swarm(drones, solver_settings)
 
     # Set initial states
     initial_states = np.concat((waypoints["pos"][0], np.zeros((num_drones, 3))), axis=-1)
-    constraint_configs = [amswarmpy.ConstraintConfig() for k in range(num_drones)]
+    solve_success, iters, drone_results = swarm.solve(
+        0, initial_states, drone_results, solver_settings
+    )
+    if not all(solve_success):
+        print("Warning: Solve failed")
 
-    drone_results = solve_swarm(swarm, 0, initial_states, drone_results, constraint_configs)
     current_positions = waypoints["pos"][0]
 
     sim.reset()
@@ -218,9 +232,12 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         current_time = step / mpc_freq
 
         initial_states = np.concat((current_positions, np.zeros((num_drones, 3))), axis=-1)
-        drone_results = solve_swarm(
-            swarm, current_time, initial_states, drone_results, constraint_configs
+        solve_success, iters, drone_results = swarm.solve(
+            current_time, initial_states, drone_results, solver_settings
         )
+        if not all(solve_success):
+            print("Warning: Solve failed")
+
         for result in drone_results:
             result.advance_for_next_solve_step()
         control = np.stack([r.positions[1] for r in drone_results], axis=0)

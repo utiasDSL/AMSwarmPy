@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .drone import ConstraintConfig, Drone, DroneResult
+from .drone import Drone, DroneResult, SolverData, SolverSettings
 
 
 class Swarm:
@@ -16,34 +16,37 @@ class Swarm:
         drones: List of Drone objects that are part of the swarm
     """
 
-    def __init__(self, drones: list[Drone]):
-        self.num_drones = len(drones)
+    def __init__(self, drones: list[Drone], settings: SolverSettings):
+        self.n_drones = len(drones)
         self.drones = drones
         # Collision envelope for each drone at each time step
         self.all_obstacle_envelopes: list[np.ndarray] = []
         self._reduced_collision_envelopes: list[np.ndarray] = []
         if self.drones:
             # Create identity matrix of size K+1 x K+1
-            eye_kp1 = np.eye(self.drones[0].mpc_config.K + 1)
+            eye_kp1 = np.eye(settings.mpc.K + 1)
 
             # Create collision matrices over all time steps for each drone
-            for i in range(self.num_drones):
+            for _ in range(self.n_drones):
                 # At each time step, each drone will take the relevant collision envelopes
                 # from this vector according to which drones they need to avoid
-                envelope = self.drones[i].collision_envelope
+                limits = settings.limits
+                envelope = 1.0 / np.array(
+                    [limits.collision_x, limits.collision_y, limits.collision_z]
+                )
                 self.all_obstacle_envelopes.append(np.kron(eye_kp1, envelope * np.eye(3)))
                 self._reduced_collision_envelopes.append(envelope)
         self.avoidance_map = {
-            i: [j for j in range(self.num_drones) if j != i] for i in range(self.num_drones)
+            i: [j for j in range(self.n_drones) if j != i] for i in range(self.n_drones)
         }
-        # self.avoidance_map = assign_tuples(list(combinations(range(self.num_drones), 2)))
+        # self.avoidance_map = assign_tuples(list(combinations(range(self.n_drones), 2)))
 
     def solve(
         self,
         current_time: float,
         initial_states: list[np.ndarray],
         previous_results: list[DroneResult],
-        constraint_configs: list[ConstraintConfig],
+        settings: SolverSettings,
     ) -> tuple[list[bool], list[int], list[DroneResult]]:
         """Solves the navigation and collision avoidance problem for the entire swarm.
 
@@ -57,7 +60,7 @@ class Swarm:
             initial_states: List of initial states for each drone. Each initial state consists of [x, y, z, vx, vy, vz]
             previous_results: List of results from previous computation for each drone. If no previous results,
                             can initialize with DroneResult.generate_initial_drone_result(...)
-            constraint_configs: List of constraint configurations for each drone
+            constraint_settings: List of constraint configurations for each drone
 
         Returns:
             Tuple containing:
@@ -66,17 +69,14 @@ class Swarm:
             - List of results for the current computation
         """
         # Validate input sizes
-        if (
-            len(initial_states) != self.num_drones
-            or len(previous_results) != self.num_drones
-            or len(constraint_configs) != self.num_drones
-        ):
+        if len(initial_states) != self.n_drones or len(previous_results) != self.n_drones:
             raise ValueError("Input lists must all have same length as number of drones in swarm")
+        assert isinstance(settings, SolverSettings), f"Unexpected type: {type(settings)}"
 
         # Initialize results
-        is_success = np.zeros(self.num_drones, dtype=bool)
-        iters = np.zeros(self.num_drones)
-        results = [None] * self.num_drones
+        is_success = np.zeros(self.n_drones, dtype=bool)
+        iters = np.zeros(self.n_drones)
+        results = [None] * self.n_drones
 
         # Solve for each drone
         for i in range(len(self.drones)):
@@ -97,21 +97,20 @@ class Swarm:
                     obstacle_envelopes.append(self.all_obstacle_envelopes[avoid_drone])
                     num_obstacles += 1
 
-            # Set up arguments for drone solve
-            args = {
-                "current_time": current_time,
-                "num_obstacles": num_obstacles,
-                "obstacle_positions": obstacle_positions,
-                "obstacle_envelopes": obstacle_envelopes,
-                "x_0": initial_states[i],
-                "u_0": previous_results[i].input_positions[0],
-                "u_dot_0": previous_results[i].input_velocities[0],
-                "u_ddot_0": previous_results[i].input_accelerations[0],
-                "constraint_config": constraint_configs[i],
-            }
+            data = SolverData(
+                current_time=current_time,
+                n_obstacles=num_obstacles,
+                obstacle_positions=obstacle_positions,
+                obstacle_envelopes=obstacle_envelopes,
+                x_0=initial_states[i],
+                u_0=previous_results[i].input_positions[0],
+                u_dot_0=previous_results[i].input_velocities[0],
+                u_ddot_0=previous_results[i].input_accelerations[0],
+            )
+            settings.data = data
 
             # Solve for this drone
-            success, num_iters, result = self.drones[i].solve(args)
+            success, num_iters, result = self.drones[i].solve(settings)
             is_success[i] = success
             iters[i] = num_iters
             results[i] = result

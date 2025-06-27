@@ -31,8 +31,8 @@ class Drone:
         self.waypoints = waypoints
 
         # Initialize Bernstein and dynamics matrices
-        K = settings.mpc.K
-        self.W, self.W_dot, self.W_ddot, W_input = self.init_bernstein_matrices(settings.mpc)
+        K, N = settings.mpc.K, settings.mpc.N
+        self.W, self.W_dot, self.W_ddot, W_input = bernstein_matrices(K, N, settings.mpc.freq)
         self.S_x, S_u, S_x_prime, S_u_prime = self.init_full_horizon_dynamics_matrices(dynamics, K)
         # Precompute matrices that don't change at solve time
         self.S_u_W_input = S_u @ W_input
@@ -76,9 +76,9 @@ class Drone:
         # Extract waypoints in current horizon. Each row is a waypoint of form:
         # [k, x, y, z, vx, vy, vz, ax, ay, az]. k is discrete STEP in current horizon
         data = settings.data
-        K, mpc_freq = settings.mpc.K, settings.mpc.mpc_freq
+        K, freq = settings.mpc.K, settings.mpc.freq
 
-        mask, steps = filter_horizon(self.waypoints["time"], data.current_time, K, mpc_freq)
+        mask, steps = filter_horizon(self.waypoints["time"], data.current_time, K, freq)
         # Separate and reshape waypoints into position, velocity, and acceleration vectors
         des_pos = self.waypoints["pos"][mask].flatten()
         des_vel = self.waypoints["vel"][mask].flatten()
@@ -310,90 +310,6 @@ class Drone:
         for constraint in self.constraints:
             constraint.reset()
 
-    def init_bernstein_matrices(
-        self, mpc_settings: MPCSettings
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Initialize Bernstein polynomial matrices used for input parameterization.
-
-        Args:
-            mpc_settings: MPC configuration parameters
-
-        Returns:
-            Tuple of (W, W_dot, W_ddot, W_input) matrices where:
-            - W: Position basis matrix
-            - W_dot: Velocity basis matrix
-            - W_ddot: Acceleration basis matrix
-            - W_input: Combined position/velocity input matrix
-        """
-        K, N = mpc_settings.K, mpc_settings.N
-
-        W = np.zeros((3 * K, 3 * (N + 1)))
-        W_dot = np.zeros((3 * K, 3 * (N + 1)))
-        W_ddot = np.zeros((3 * K, 3 * (N + 1)))
-        W_input = np.zeros((6 * K, 3 * (N + 1)))
-
-        t_f = (1 / mpc_settings.mpc_freq) * (K - 1)
-
-        for k in range(K):
-            t = k * (1 / mpc_settings.mpc_freq)
-            t_f_minus_t = t_f - t
-            t_pow_n = t_f**N
-
-            for m in range(N + 1):
-                n_choose_m = comb(N, m, exact=True)
-                # Position basis
-                val = (t**m) * n_choose_m * (t_f_minus_t ** (N - m)) / t_pow_n
-
-                # Velocity basis
-                if k == 0 and m == 0:
-                    dot_val = -N / t_f
-                elif k == (K - 1) and m == N:
-                    dot_val = N / t_f
-                else:
-                    dot_val = (
-                        (t_f ** (-N))
-                        * n_choose_m
-                        * (
-                            m * (t ** (m - 1)) * (t_f_minus_t ** (N - m))
-                            - (t**m) * (N - m) * (t_f_minus_t ** (N - m - 1))
-                        )
-                    )
-
-                # Acceleration basis
-                if k == 0 and m == 0:
-                    dotdot_val = N * (N - 1) / (t_f**2)
-                elif k == K - 1 and m == N:
-                    dotdot_val = N * (N - 1) / (t_f**2)
-                elif k == 0 and m == 1:
-                    dotdot_val = -2 * N * (N - 1) / (t_f**2)
-                elif k == K - 1 and m == N - 1:
-                    dotdot_val = -2 * N * (N - 1) / (t_f**2)
-                else:
-                    dotdot_val = (
-                        (t_f**-N)
-                        * n_choose_m
-                        * (
-                            m * (m - 1) * (t ** (m - 2)) * (t_f_minus_t ** (N - m))
-                            - 2 * m * (N - m) * (t ** (m - 1)) * (t_f_minus_t ** (N - m - 1))
-                            + (N - m) * (N - m - 1) * (t**m) * (t_f_minus_t ** (N - m - 2))
-                        )
-                    )
-
-                # Fill matrices if values are non-zero
-                row_idx = [3 * k, 3 * k + 1, 3 * k + 2]
-                col_idx = [m, m + N + 1, m + 2 * (N + 1)]
-
-                W[row_idx, col_idx] = val
-                W_dot[row_idx, col_idx] = dot_val
-                W_ddot[row_idx, col_idx] = dotdot_val
-
-        # Construct input matrix
-        for block in range(K):
-            W_input[6 * block : 6 * block + 3, :] = W[3 * block : 3 * block + 3, :]
-            W_input[6 * block + 3 : 6 * block + 6, :] = W_dot[3 * block : 3 * block + 3, :]
-
-        return W, W_dot, W_ddot, W_input
-
     def init_full_horizon_dynamics_matrices(
         self, dynamics: SparseDynamics, K: int
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -548,7 +464,7 @@ class MPCSettings:
 
     K: int = 25  # Number of timesteps in horizon
     N: int = 10  # Number of spline coefficients
-    mpc_freq: float = 8.0  # MPC solver frequency (Hz)
+    freq: float = 8.0  # MPC solver frequency (Hz)
     bf_gamma: float = 1.0  # Barrier function gamma parameter
     waypoints_pos_tol: float = 1e-2  # Waypoint position constraint tolerance
     waypoints_vel_tol: float = 1e-2  # Waypoint velocity constraint tolerance
@@ -612,3 +528,84 @@ def filter_horizon(times: NDArray, t: float, K: int, mpc_freq: float) -> tuple[N
             "Error: no waypoints within current horizon. Increase horizon or add waypoints."
         )
     return in_horizon, rounded_times[in_horizon]
+
+
+def bernstein_matrices(K: int, N: int, freq: int) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    """Initialize Bernstein polynomial matrices used for input parameterization.
+
+    Args:
+        mpc_settings: MPC configuration parameters
+
+    Returns:
+        Tuple of (W, W_dot, W_ddot, W_input) matrices where:
+        - W: Position basis matrix
+        - W_dot: Velocity basis matrix
+        - W_ddot: Acceleration basis matrix
+        - W_input: Combined position/velocity input matrix
+    """
+
+    W = np.zeros((3 * K, 3 * (N + 1)))
+    W_dot = np.zeros((3 * K, 3 * (N + 1)))
+    W_ddot = np.zeros((3 * K, 3 * (N + 1)))
+
+    t_f = (K - 1) / freq
+
+    for k in range(K):
+        t = k / freq
+        t_f_minus_t = t_f - t
+        t_pow_n = t_f**N
+
+        for m in range(N + 1):
+            n_choose_m = comb(N, m, exact=True)
+            # Position basis
+            val = (t**m) * n_choose_m * (t_f_minus_t ** (N - m)) / t_pow_n
+
+            # Velocity basis
+            if k == 0 and m == 0:
+                dot_val = -N / t_f
+            elif k == (K - 1) and m == N:
+                dot_val = N / t_f
+            else:
+                dot_val = (
+                    t_f**-N
+                    * n_choose_m
+                    * (
+                        m * (t ** (m - 1)) * (t_f_minus_t ** (N - m))
+                        - (t**m) * (N - m) * (t_f_minus_t ** (N - m - 1))
+                    )
+                )
+
+            # Acceleration basis
+            if k == 0 and m == 0:
+                dotdot_val = N * (N - 1) / (t_f**2)
+            elif k == K - 1 and m == N:
+                dotdot_val = N * (N - 1) / (t_f**2)
+            elif k == 0 and m == 1:
+                dotdot_val = -2 * N * (N - 1) / (t_f**2)
+            elif k == K - 1 and m == N - 1:
+                dotdot_val = -2 * N * (N - 1) / (t_f**2)
+            else:
+                dotdot_val = (
+                    (t_f**-N)
+                    * n_choose_m
+                    * (
+                        m * (m - 1) * (t ** (m - 2)) * (t_f_minus_t ** (N - m))
+                        - 2 * m * (N - m) * (t ** (m - 1)) * (t_f_minus_t ** (N - m - 1))
+                        + (N - m) * (N - m - 1) * (t**m) * (t_f_minus_t ** (N - m - 2))
+                    )
+                )
+
+            # Fill matrices if values are non-zero
+            row_idx = [3 * k, 3 * k + 1, 3 * k + 2]
+            col_idx = [m, m + N + 1, m + 2 * (N + 1)]
+
+            W[row_idx, col_idx] = val
+            W_dot[row_idx, col_idx] = dot_val
+            W_ddot[row_idx, col_idx] = dotdot_val
+
+    # Matrix of rows [x0, y0, z0, vx0, vy0, vz0, x1, y1, z1, vx1, vy1, vz1, ...]
+    W_view = W.reshape(-1, W.shape[1] * 3)
+    W_dot_view = W_dot.reshape(-1, W_dot.shape[1] * 3)
+    W_input = np.concat((W_view, W_dot_view), axis=-1).reshape(-1, W.shape[1])
+
+    return W, W_dot, W_ddot, W_input

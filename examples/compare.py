@@ -89,10 +89,10 @@ def simulate_amswarm(sim, waypoints, render=False) -> NDArray:
     # Setup simulation parameters
     mpc_freq = settings["MPCConfig"]["mpc_freq"]
     duration_sec = waypoints[0][-1, 0]
-    num_steps = int(duration_sec * mpc_freq)
+    n_steps = int(duration_sec * mpc_freq)
 
     # Initialize results storage
-    simulated_pos = np.zeros((num_steps, num_drones, 3))
+    simulated_pos = np.zeros((n_steps, num_drones, 3))
 
     drone_results = [
         amswarm.DroneResult.generateInitialDroneResult(
@@ -128,7 +128,7 @@ def simulate_amswarm(sim, waypoints, render=False) -> NDArray:
     pos = np.stack([waypoints[i][0, 1:4] for i in range(num_drones)], axis=0).reshape(1, -1, 3)
     sim.data = sim.data.replace(states=sim.data.states.replace(pos=pos))
 
-    for step in range(num_steps):
+    for step in range(n_steps):
         current_time = step / mpc_freq
 
         initial_states = [np.concatenate((current_positions[k], [0, 0, 0])) for k in waypoints]
@@ -171,12 +171,12 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     num_drones = sim.n_drones
 
     # Setup simulation parameters
-    mpc_freq = settings["MPCSettings"]["mpc_freq"]
+    mpc_freq = settings["MPCSettings"]["freq"]
     duration_sec = waypoints["time"][-1, 0]
-    num_steps = int(duration_sec * mpc_freq)
+    n_steps = int(duration_sec * mpc_freq)
 
     # Initialize results storage
-    simulated_pos = np.zeros((num_steps, num_drones, 3))
+    simulated_pos = np.zeros((n_steps, num_drones, 3))
 
     drone_results = [
         amswarmpy.DroneResult.generate_initial_drone_result(
@@ -228,7 +228,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     pos = waypoints["pos"][[0]]
     sim.data = sim.data.replace(states=sim.data.states.replace(pos=pos))
 
-    for step in range(num_steps):
+    for step in range(n_steps):
         current_time = step / mpc_freq
 
         initial_states = np.concat((current_positions, np.zeros((num_drones, 3))), axis=-1)

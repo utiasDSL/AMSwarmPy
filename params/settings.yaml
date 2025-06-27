@@ -10,7 +10,7 @@ SolverSettings:
 MPCSettings:
   K: 35  # Number of timesteps in the optimization horizon
   N: 10  # Spline order for AMSwarm trajectories
-  mpc_freq: 8  # MPC control frequency of AMSwarm in Hz
+  freq: 8  # MPC control frequency of AMSwarm in Hz
   bf_gamma: 1.0  # Barrier function gamma [0, 1.0] -> 1.0 is most aggressive
   waypoints_pos_tol: 0.1  # Tolerance for the waypoints position constraint
   waypoints_vel_tol: 0.01  # Tolerance for the waypoints velocity constraint

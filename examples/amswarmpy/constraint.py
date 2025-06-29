@@ -1,6 +1,7 @@
 from typing import Protocol
 
 import numpy as np
+from numpy.typing import NDArray
 
 
 class Constraint(Protocol):
@@ -152,41 +153,63 @@ class PolarInequalityConstraint:
     def update(self, x: np.ndarray) -> None:
         if self.G.shape[1] != x.shape[0]:
             raise ValueError("G and x are not compatible sizes")
+        assert not (self.apply_upr_bound and self.apply_lwr_bound)
 
-        h_tmp = self.G @ x + self.c
+        if self.bf_gamma == 1.0:
+            self.h = self._fast_h(x) - self.c
+            return
+
+        h = self.G @ x + self.c
         prev_norm = 0
+        h = h.reshape(-1, 3)
+        h_norm = np.linalg.norm(h, axis=-1)
 
-        for i in range(0, h_tmp.shape[0], 3):
+        prev_norm = self.upr_bound if self.apply_upr_bound else self.lwr_bound
+
+        for i in range(0, h.shape[0]):
             # Calculate norm of current time segment
-            segment = h_tmp[i : i + 3]
-            segment_norm = np.linalg.norm(segment)
+            segment_norm = h_norm[i]
 
             # Apply upper bound if not infinite
             if self.apply_upr_bound:
-                if i > 0:
-                    bound = self.upr_bound - (1.0 - self.bf_gamma) * (self.upr_bound - prev_norm)
-                else:
-                    bound = self.upr_bound
+                bound = self.bf_gamma * self.upr_bound + (1.0 - self.bf_gamma) * prev_norm
 
                 if segment_norm > bound:
-                    h_tmp[i : i + 3] *= bound / segment_norm
+                    h[i] *= bound / segment_norm
                     segment_norm = bound
 
             # Apply lower bound if not infinite
             if self.apply_lwr_bound:
-                if i > 0:
-                    bound = self.lwr_bound + (1.0 - self.bf_gamma) * (prev_norm - self.lwr_bound)
-                else:
-                    bound = self.lwr_bound
+                bound = self.bf_gamma * self.lwr_bound + (1.0 - self.bf_gamma) * prev_norm
+                assert self.bf_gamma == 1.0
 
                 if segment_norm < bound:
-                    h_tmp[i : i + 3] *= bound / segment_norm
+                    h[i] *= bound / segment_norm
                     segment_norm = bound
 
             # Track norm for next iteration
             prev_norm = segment_norm
 
-        self.h = h_tmp - self.c
+        h = h.flatten()
+        self.h = h - self.c
+
+    def _fast_h(self, x: NDArray):
+        assert self.bf_gamma == 1.0, "Fast-path barrier function gamma must be zero"
+
+        h = self.G @ x + self.c
+        h = h.reshape(-1, 3)
+        h_norm = np.linalg.norm(h, axis=-1)
+
+        if self.apply_upr_bound:
+            mask = h_norm > self.upr_bound
+            bound = self.upr_bound
+        elif self.apply_lwr_bound:
+            mask = h_norm < self.lwr_bound
+            bound = self.lwr_bound
+        else:
+            raise ValueError("Must be either upper or lower")
+        h[mask] = h[mask] / h_norm[mask][:, None] * bound
+        return h.flatten()
 
     def is_satisfied(self, x: np.ndarray) -> bool:
         return np.max(np.abs(self.G @ x - self.h)) < self.tolerance

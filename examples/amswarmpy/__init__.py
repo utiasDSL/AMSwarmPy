@@ -1,3 +1,4 @@
+from .core import solve
 from .drone import (
     ConstraintSettings,
     Drone,
@@ -9,7 +10,6 @@ from .drone import (
     SparseDynamics,
     Weights,
 )
-from .swarm import Swarm
 
 __all__ = [
     "ConstraintSettings",
@@ -20,6 +20,6 @@ __all__ = [
     "SolverData",
     "SolverSettings",
     "SparseDynamics",
-    "Swarm",
     "Weights",
+    "solve",
 ]

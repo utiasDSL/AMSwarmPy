@@ -211,12 +211,11 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         )
         for i in range(num_drones)
     ]
-    swarm = amswarmpy.Swarm(drones, solver_settings)
 
     # Set initial states
     initial_states = np.concat((waypoints["pos"][0], np.zeros((num_drones, 3))), axis=-1)
-    solve_success, iters, drone_results = swarm.solve(
-        0, initial_states, drone_results, solver_settings
+    solve_success, iters, drone_results = amswarmpy.solve(
+        drones, 0, initial_states, drone_results, solver_settings
     )
     if not all(solve_success):
         print("Warning: Solve failed")
@@ -232,8 +231,8 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         current_time = step / mpc_freq
 
         initial_states = np.concat((current_positions, np.zeros((num_drones, 3))), axis=-1)
-        solve_success, iters, drone_results = swarm.solve(
-            current_time, initial_states, drone_results, solver_settings
+        solve_success, iters, drone_results = amswarmpy.solve(
+            drones, current_time, initial_states, drone_results, solver_settings
         )
         if not all(solve_success):
             print("Warning: Solve failed")

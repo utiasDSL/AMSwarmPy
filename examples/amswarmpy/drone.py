@@ -161,11 +161,10 @@ class Drone:
         )
 
         # Collision constraints
-        for i in range(data.n_obstacles):
-            G_c = data.obstacle_envelopes[i] @ self.M_p_S_u_W_input
-            c_c = data.obstacle_envelopes[i] @ (
-                self.M_p_S_x @ data.x_0 - data.obstacle_positions[i]
-            )
+        for pos, envelope in zip(data.obstacle_positions, data.obstacle_envelopes, strict=True):
+            envelope = np.tile(envelope, K + 1)
+            G_c = envelope[:, None] * self.M_p_S_u_W_input
+            c_c = envelope * (self.M_p_S_x @ data.x_0 - pos)
             self.add_constraint(
                 PolarInequalityConstraint(
                     G_c,
@@ -216,7 +215,6 @@ class Drone:
         Not meant to be overridden by child classes.
         """
         # Initialize solver components
-        iters = 0
         rho = settings.rho_init
 
         # Initialize optimization variables and matrices
@@ -233,10 +231,8 @@ class Drone:
             quad_constraint_terms += constraint.get_quadratic_term()
             linear_constraint_terms += constraint.get_linear_term()
 
-        # Plot heatmaps of Q matrices side by side
-
         # Iteratively solve until solution found or max iterations reached
-        while iters < settings.max_iters:
+        for i in range(settings.max_iters):
             Q = self.quad_cost + rho * quad_constraint_terms
 
             # Construct linear cost matrices
@@ -249,13 +245,8 @@ class Drone:
             # Update constraints
             self.update_constraints(x)
 
-            # Check if all constraints are satisfied
-            all_constraints_satisfied = all(
-                constraint.is_satisfied(x) for constraint in self.constraints
-            )
-
-            if all_constraints_satisfied:
-                return True, iters, x  # Exit loop, indicate success
+            if all(c.is_satisfied(x) for c in self.constraints):
+                return True, i, x  # Exit loop, indicate success
 
             # Recalculate linear term for Bregman multiplier
             linear_constraint_terms[...] = 0
@@ -263,15 +254,13 @@ class Drone:
                 linear_constraint_terms += constraint.get_linear_term()
 
             # Calculate Bregman multiplier
-            bregman_update = 0.5 * (quad_constraint_terms @ x + linear_constraint_terms)
-            bregman_mult -= bregman_update
+            bregman_mult -= 0.5 * (quad_constraint_terms @ x + linear_constraint_terms)
 
             # Gradually increase penalty parameter
             rho *= settings.rho_init
             rho = min(rho, settings.rho_max)
-            iters += 1
 
-        return False, iters, x  # Indicate failure but still return vector
+        return False, i, x  # Indicate failure but still return vector
 
     def solve(self, settings: SolverSettings) -> tuple[bool, int, any]:
         """Main solve function to be called by user.
@@ -413,7 +402,6 @@ class SolverData:
     """Arguments for drone trajectory optimization"""
 
     current_time: float = 0.0
-    n_obstacles: int = 0
     obstacle_envelopes: list[np.ndarray] = None
     obstacle_positions: list[np.ndarray] = None
     x_0: np.ndarray = field(default_factory=lambda: np.zeros(6))  # Initial state [pos, vel]
@@ -543,7 +531,6 @@ def bernstein_matrices(K: int, N: int, freq: int) -> tuple[NDArray, NDArray, NDA
         - W_ddot: Acceleration basis matrix
         - W_input: Combined position/velocity input matrix
     """
-
     W = np.zeros((3 * K, 3 * (N + 1)))
     W_dot = np.zeros((3 * K, 3 * (N + 1)))
     W_ddot = np.zeros((3 * K, 3 * (N + 1)))

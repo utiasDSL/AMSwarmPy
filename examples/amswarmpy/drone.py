@@ -48,8 +48,7 @@ class Drone:
         self.M_a_S_x_prime = S_x_prime[a_idx]
 
         # Precompute constraint matrices
-        s = (slice(3), slice(3 * (settings.mpc.N + 1)))  # [:3, :3 * (mpc_settings.n + 1)]
-        self.G_u = np.concat((self.W[s], self.W_dot[s], self.W_ddot[s]))
+        self.G_u = np.concat((self.W[:3], self.W_dot[:3], self.W_ddot[:3]))
         self.G_p = np.concat((self.M_p_S_u_W_input, -self.M_p_S_u_W_input))
 
         # Initialize cost matrices
@@ -60,6 +59,7 @@ class Drone:
         )
 
         self.initial_quad_cost += 2 * weights.input_continuity * self.G_u.T @ self.G_u
+        self.quad_cost = self.initial_quad_cost.copy()
         self.linear_cost = np.zeros(3 * (settings.mpc.N + 1))
         self.linear_cost_smoothness_const_term = (
             2 * weights.smoothness * self.M_a_S_u_prime_W_input.T @ self.M_a_S_x_prime
@@ -278,7 +278,7 @@ class Drone:
 
     def reset_cost_matrices(self) -> None:
         """Resets cost matrices to initial values"""
-        self.quad_cost = self.initial_quad_cost
+        self.quad_cost = self.initial_quad_cost.copy()
         self.linear_cost[...] = 0
 
 

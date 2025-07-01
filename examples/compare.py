@@ -179,9 +179,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     simulated_pos = np.zeros((n_steps, num_drones, 3))
 
     drone_results = [
-        amswarmpy.DroneResult.generate_initial_drone_result(
-            waypoints["pos"][k, 0], settings["MPCSettings"]["K"]
-        )
+        amswarmpy.Result.initial_result(waypoints["pos"][k, 0], settings["MPCSettings"]["K"])
         for k in range(num_drones)
     ]
 
@@ -203,19 +201,15 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     solver_settings.constraints.vel = False
     solver_settings.constraints.acc = False
     solver_settings.constraints.input_continuity = True
+    dynamics = amswarmpy.Dynamics(**settings["Dynamics"])
     drones = [
-        amswarmpy.Drone(
-            settings=solver_settings,
-            waypoints={k: v[:, i] for k, v in waypoints.items()},
-            dynamics=amswarmpy.SparseDynamics(**settings["Dynamics"]),
-        )
-        for i in range(num_drones)
+        amswarmpy.Drone(settings=solver_settings, dynamics=dynamics) for i in range(num_drones)
     ]
 
     # Set initial states
     initial_states = np.concat((waypoints["pos"][0], np.zeros((num_drones, 3))), axis=-1)
     solve_success, iters, drone_results = amswarmpy.solve(
-        drones, 0, initial_states, drone_results, solver_settings
+        drones, 0, initial_states, waypoints, drone_results, solver_settings
     )
     if not all(solve_success):
         print("Warning: Solve failed")
@@ -232,21 +226,21 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
 
         initial_states = np.concat((current_positions, np.zeros((num_drones, 3))), axis=-1)
         solve_success, iters, drone_results = amswarmpy.solve(
-            drones, current_time, initial_states, drone_results, solver_settings
+            drones, current_time, initial_states, waypoints, drone_results, solver_settings
         )
         if not all(solve_success):
             print("Warning: Solve failed")
 
         for result in drone_results:
             result.advance_for_next_solve_step()
-        control = np.stack([r.positions[1] for r in drone_results], axis=0)
+        control = np.stack([r.pos[1] for r in drone_results], axis=0)
         control = np.concat([control, np.zeros((control.shape[0], 10))], axis=-1)
         control = control[None, ...]
 
         sim.state_control(control)
         sim.step(sim.freq // mpc_freq)
         if render:
-            render_solutions(sim, [r.positions for r in drone_results])
+            render_solutions(sim, [r.pos for r in drone_results])
             for i in range(num_drones):
                 draw_points(sim, waypoints["pos"][:, i, :], rgba=rgbas[i], size=0.02)
             sim.render()

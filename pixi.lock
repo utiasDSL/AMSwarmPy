@@ -259,7 +259,7 @@ packages:
 - pypi: ./
   name: amswarm
   version: 0.1.0
-  sha256: 28b342fb783a8d400d9d9d47d2d8cd21aacd02443985ae24ccd5e2fa110e4fd7
+  sha256: fd1fa5f7e2043b6c7c52cd3720b45f43cfa32d38c1fdc1a23806a2a195eb9b0d
   requires_dist:
   - crazyflow[gpu]>=0.0.1,<0.0.2
   requires_python: '>=3.8'

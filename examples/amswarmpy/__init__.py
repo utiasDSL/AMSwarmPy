@@ -2,24 +2,24 @@ from .core import solve
 from .drone import (
     ConstraintSettings,
     Drone,
-    DroneResult,
+    Dynamics,
     Limits,
     MPCSettings,
+    Result,
     SolverData,
     SolverSettings,
-    SparseDynamics,
     Weights,
 )
 
 __all__ = [
     "ConstraintSettings",
     "Drone",
-    "DroneResult",
+    "Dynamics",
     "Limits",
     "MPCSettings",
+    "Result",
     "SolverData",
     "SolverSettings",
-    "SparseDynamics",
     "Weights",
     "solve",
 ]

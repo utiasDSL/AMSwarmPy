@@ -26,14 +26,11 @@ class Drone:
         dynamics: Dynamics matrices for the drone
     """
 
-    def __init__(self, settings: SolverSettings, waypoints: np.ndarray, dynamics: SparseDynamics):
-        self.constraints: list[Constraint] = []
-        self.waypoints = waypoints
-
+    def __init__(self, settings: SolverSettings, dynamics: Dynamics):
         # Initialize Bernstein and dynamics matrices
         K, N = settings.mpc.K, settings.mpc.N
         self.W, self.W_dot, self.W_ddot, W_input = bernstein_matrices(K, N, settings.mpc.freq)
-        self.S_x, S_u, S_x_prime, S_u_prime = self.init_full_horizon_dynamics_matrices(dynamics, K)
+        self.S_x, S_u, S_x_prime, S_u_prime = full_horizon_dynamics_matrices(dynamics, K)
         # Precompute matrices that don't change at solve time
         self.S_u_W_input = S_u @ W_input
 
@@ -63,68 +60,66 @@ class Drone:
         )
 
         self.initial_quad_cost += 2 * weights.input_continuity * self.G_u.T @ self.G_u
-        self.initial_linear_cost = np.zeros(3 * (settings.mpc.N + 1))
+        self.linear_cost = np.zeros(3 * (settings.mpc.N + 1))
         self.linear_cost_smoothness_const_term = (
             2 * weights.smoothness * self.M_a_S_u_prime_W_input.T @ self.M_a_S_x_prime
         )
 
-    def pre_solve(self, settings: SolverSettings) -> None:
+    def pre_solve(self, data: SolverData, settings: SolverSettings):
         """Setup optimization problem before solving.
 
         Override of AMSolver method that configures constraints and cost functions.
         """
         # Extract waypoints in current horizon. Each row is a waypoint of form:
         # [k, x, y, z, vx, vy, vz, ax, ay, az]. k is discrete STEP in current horizon
-        data = settings.data
         K, freq = settings.mpc.K, settings.mpc.freq
+        if data.zeta is None:
+            data.zeta = np.zeros(self.quad_cost.shape[0])  # Init optimization variable
 
-        mask, steps = filter_horizon(self.waypoints["time"], data.current_time, K, freq)
+        mask, steps = filter_horizon(data.waypoints["time"], data.current_time, K, freq)
         # Separate and reshape waypoints into position, velocity, and acceleration vectors
-        des_pos = self.waypoints["pos"][mask].flatten()
-        des_vel = self.waypoints["vel"][mask].flatten()
-        des_acc = self.waypoints["acc"][mask].flatten()
+        des_pos = data.waypoints["pos"][mask].flatten()
+        des_vel = data.waypoints["vel"][mask].flatten()
+        des_acc = data.waypoints["acc"][mask].flatten()
 
         # Extract penalized steps from first column of waypoints
         # First possible penalized step is 1, NOT 0 (input cannot affect initial state)
-        # Create matrix that selects timesteps corresponding to waypoints
-        M_waypoints = np.zeros((3 * len(steps), 3 * (K + 1)))
-        eye3 = np.eye(3)
-        for i in range(len(steps)):
-            M_waypoints[3 * i : 3 * (i + 1), 3 * int(steps[i]) : 3 * int(steps[i]) + 3] = eye3
+        wp_idx = np.repeat(steps, 3) * 3 + np.tile(np.arange(3, dtype=int), len(steps))
+
         # Plot the waypoint selection matrix
         # Output smoothness cost
         self.linear_cost += self.linear_cost_smoothness_const_term @ data.x_0
 
         # --- Add constraints - see thesis document for derivations ---
         # Waypoint position cost and/or equality constraint
-        G_wp = M_waypoints @ self.M_p_S_u_W_input
-        h_wp = des_pos - M_waypoints @ self.M_p_S_x @ data.x_0
+        G_wp = self.M_p_S_u_W_input[wp_idx]
+        h_wp = des_pos - self.M_p_S_x[wp_idx] @ data.x_0
         self.quad_cost += 2 * settings.weights.pos * G_wp.T @ G_wp
         self.linear_cost += -2 * settings.weights.pos * G_wp.T @ h_wp
         if settings.constraints.pos:
-            self.add_constraint(EqualityConstraint(G_wp, h_wp, settings.mpc.waypoints_pos_tol))
+            data.constraints.append(EqualityConstraint(G_wp, h_wp, settings.mpc.waypoints_pos_tol))
 
         # Waypoint velocity cost and/or equality constraint
-        G_wv = M_waypoints @ self.M_v_S_u_W_input
-        h_wv = des_vel - M_waypoints @ self.M_v_S_x @ data.x_0
+        G_wv = self.M_v_S_u_W_input[wp_idx]
+        h_wv = des_vel - self.M_v_S_x[wp_idx] @ data.x_0
         self.quad_cost += 2 * settings.weights.vel * G_wv.T @ G_wv
         self.linear_cost += -2 * settings.weights.vel * G_wv.T @ h_wv
         if settings.constraints.vel:
-            self.add_constraint(EqualityConstraint(G_wv, h_wv, settings.mpc.waypoints_vel_tol))
+            data.constraints.append(EqualityConstraint(G_wv, h_wv, settings.mpc.waypoints_vel_tol))
 
         # Waypoint acceleration cost and/or equality constraint
-        G_wa = M_waypoints @ self.M_a_S_u_prime_W_input
-        h_wa = des_acc - M_waypoints @ self.M_a_S_x_prime @ data.x_0
+        G_wa = self.M_a_S_u_prime_W_input[wp_idx]
+        h_wa = des_acc - self.M_a_S_x_prime[wp_idx] @ data.x_0
         self.quad_cost += 2 * settings.weights.acc * G_wa.T @ G_wa
         self.linear_cost += -2 * settings.weights.acc * G_wa.T @ h_wa
         if settings.constraints.acc:
-            self.add_constraint(EqualityConstraint(G_wa, h_wa, settings.mpc.waypoints_acc_tol))
+            data.constraints.append(EqualityConstraint(G_wa, h_wa, settings.mpc.waypoints_acc_tol))
 
         # Input continuity cost and/or equality constraint
         h_u = np.concatenate([data.u_0, data.u_dot_0, data.u_ddot_0])
         self.linear_cost += -2 * settings.weights.input_continuity * self.G_u.T @ h_u
         if settings.constraints.input_continuity:
-            self.add_constraint(
+            data.constraints.append(
                 EqualityConstraint(self.G_u, h_u, settings.mpc.input_continuity_tol)
             )
 
@@ -132,11 +127,11 @@ class Drone:
         upper = np.tile(settings.limits.pos_max, K + 1) - self.M_p_S_x @ data.x_0
         lower = -np.tile(settings.limits.pos_min, K + 1) + self.M_p_S_x @ data.x_0
         h_p = np.concatenate([upper, lower])
-        self.add_constraint(InequalityConstraint(self.G_p, h_p, settings.mpc.pos_tol))
+        data.constraints.append(InequalityConstraint(self.G_p, h_p, settings.mpc.pos_tol))
 
         # Velocity constraint
         c_v = self.M_v_S_x @ data.x_0
-        self.add_constraint(
+        data.constraints.append(
             PolarInequalityConstraint(
                 self.M_v_S_u_W_input,
                 c_v,
@@ -149,7 +144,7 @@ class Drone:
 
         # Acceleration constraint
         c_a = self.M_a_S_x_prime @ data.x_0
-        self.add_constraint(
+        data.constraints.append(
             PolarInequalityConstraint(
                 self.M_a_S_u_prime_W_input,
                 c_a,
@@ -165,7 +160,7 @@ class Drone:
             envelope = np.tile(envelope, K + 1)
             G_c = envelope[:, None] * self.M_p_S_u_W_input
             c_c = envelope * (self.M_p_S_x @ data.x_0 - pos)
-            self.add_constraint(
+            data.constraints.append(
                 PolarInequalityConstraint(
                     G_c,
                     c_c,
@@ -175,41 +170,36 @@ class Drone:
                     settings.mpc.collision_tol,
                 )
             )
+        return data
 
-    def post_solve(self, zeta: np.ndarray, settings: SolverSettings) -> DroneResult:
-        """Process optimization results into DroneResult object.
+    def post_solve(self, data: SolverData, settings: SolverSettings) -> Result:
+        """Process optimization results into Result object.
 
         Override of AMSolver method that extracts trajectories from solution.
         """
-        """Process optimization results into DroneResult object.
+        """Process optimization results into Result object.
 
         Override of AMSolver method that extracts trajectories from solution.
 
         Args:
             zeta: Solution vector from optimization
-            args: Arguments used in optimization
 
         Returns:
-            DroneResult containing optimized trajectories
+            Result containing optimized trajectories
         """
-        data = settings.data
         K = settings.mpc.K
         # Extract position trajectory from state trajectory
-        positions = (self.S_x @ data.x_0 + self.S_u_W_input @ zeta).T.reshape((K + 1, 6))[:, :3]
+        pos = (self.S_x @ data.x_0 + self.S_u_W_input @ data.zeta).T.reshape((K + 1, 6))[:, :3]
         # Get input position, velocity and acceleration from spline coefficients
-        input_positions = (self.W @ zeta).T.reshape((K, 3))
-        input_velocities = (self.W_dot @ zeta).T.reshape((K, 3))
-        input_accelerations = (self.W_ddot @ zeta).T.reshape(K, 3)
+        u_pos = (self.W @ data.zeta).T.reshape((K, 3))
+        u_vel = (self.W_dot @ data.zeta).T.reshape((K, 3))
+        u_acc = (self.W_ddot @ data.zeta).T.reshape(K, 3)
 
-        return DroneResult(
-            positions=positions,
-            input_positions=input_positions,
-            input_velocities=input_velocities,
-            input_accelerations=input_accelerations,
-            spline_coeffs=zeta,
-        )
+        return Result(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc, zeta=data.zeta)
 
-    def actual_solve(self, settings: SolverSettings) -> tuple[bool, int, np.ndarray]:
+    def actual_solve(
+        self, data: SolverData, settings: SolverSettings
+    ) -> tuple[bool, int, SolverData]:
         """Conducts actual solving process implementing optimization algorithm.
 
         Not meant to be overridden by child classes.
@@ -220,14 +210,16 @@ class Drone:
         # Initialize optimization variables and matrices
         Q = np.zeros_like(self.quad_cost)  # Combined quadratic terms
         q = np.zeros(self.quad_cost.shape[0])  # Combined linear terms
-        x = np.zeros(self.quad_cost.shape[0])  # Optimization variable
+        zeta = data.zeta
+        zeta = np.zeros(self.quad_cost.shape[0])  # Optimization variable
+
         bregman_mult = np.zeros(self.quad_cost.shape[0])  # Bregman multiplier
 
         # Aggregate quadratic and linear terms from all constraints
         quad_constraint_terms = np.zeros_like(self.quad_cost)
         linear_constraint_terms = np.zeros(self.linear_cost.shape[0])
 
-        for constraint in self.constraints:
+        for constraint in data.constraints:
             quad_constraint_terms += constraint.get_quadratic_term()
             linear_constraint_terms += constraint.get_linear_term()
 
@@ -240,29 +232,32 @@ class Drone:
             q = self.linear_cost + rho * linear_constraint_terms
 
             # Solve the QP
-            x = np.linalg.solve(Q, -q)
+            zeta = np.linalg.solve(Q, -q)
 
             # Update constraints
-            self.update_constraints(x)
+            for c in data.constraints:
+                c.update(zeta)
 
-            if all(c.is_satisfied(x) for c in self.constraints):
-                return True, i, x  # Exit loop, indicate success
+            if all(c.is_satisfied(zeta) for c in data.constraints):
+                data.zeta = zeta
+                return True, i, data  # Exit loop, indicate success
 
             # Recalculate linear term for Bregman multiplier
             linear_constraint_terms[...] = 0
-            for constraint in self.constraints:
+            for constraint in data.constraints:
                 linear_constraint_terms += constraint.get_linear_term()
 
             # Calculate Bregman multiplier
-            bregman_mult -= 0.5 * (quad_constraint_terms @ x + linear_constraint_terms)
+            bregman_mult -= 0.5 * (quad_constraint_terms @ zeta + linear_constraint_terms)
 
             # Gradually increase penalty parameter
             rho *= settings.rho_init
             rho = min(rho, settings.rho_max)
 
-        return False, i, x  # Indicate failure but still return vector
+        data.zeta = zeta
+        return False, i, data  # Indicate failure but still return vector
 
-    def solve(self, settings: SolverSettings) -> tuple[bool, int, any]:
+    def solve(self, data: SolverData, settings: SolverSettings) -> tuple[bool, int, any]:
         """Main solve function to be called by user.
 
         Contains main solving workflow (pre_solve, actual_solve, post_solve).
@@ -270,136 +265,58 @@ class Drone:
         """
         # Reset cost and clear carryover constraints from previous solves
         self.reset_cost_matrices()
-        self.constraints.clear()
+        data.constraints.clear()
         # Build new constraints and add to cost matrices
-        self.pre_solve(settings)
+        data = self.pre_solve(data, settings)
         # Ensure no carryover updates from previous solve
-        self.reset_constraints()
+        for c in data.constraints:
+            c.reset()
         # Execute solve process to get raw solution vector
-        success, iters, result = self.actual_solve(settings)
+        success, iters, data = self.actual_solve(data, settings)
         # Post-process solution according to derived class implementation
-        return success, iters, self.post_solve(result, settings)
+        return success, iters, self.post_solve(data, settings)
 
     def reset_cost_matrices(self) -> None:
         """Resets cost matrices to initial values"""
         self.quad_cost = self.initial_quad_cost
-        self.linear_cost = self.initial_linear_cost
-
-    def add_constraint(self, constraint: Constraint) -> None:
-        """Adds a constraint to the solver"""
-        self.constraints.append(constraint)
-
-    def update_constraints(self, x: np.ndarray) -> None:
-        """Updates all non-constant constraints based on current optimization variables"""
-        for constraint in self.constraints:
-            constraint.update(x)
-
-    def reset_constraints(self) -> None:
-        """Resets constraints to initial state"""
-        for constraint in self.constraints:
-            constraint.reset()
-
-    def init_full_horizon_dynamics_matrices(
-        self, dynamics: SparseDynamics, K: int
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Initialize full horizon dynamics matrices for MPC.
-
-        See thesis document for derivation of these matrices.
-
-        Args:
-            dynamics: Sparse dynamics matrices A, B, A_prime, B_prime
-            K: Number of timesteps in horizon
-
-        Returns:
-            Tuple of (S_x, S_u, S_x_prime, S_u_prime) matrices
-        """
-        n_states = dynamics.A.shape[0]
-        n_inputs = dynamics.B.shape[1]
-
-        # Initialize matrices
-        S_x = np.zeros((n_states * (K + 1), n_states))
-        S_x_prime = np.zeros((n_states * (K + 1), n_states))
-        S_u = np.zeros((n_states * (K + 1), n_inputs * K))
-        S_u_prime = np.zeros((n_states * (K + 1), n_inputs * K))
-
-        # Build S_x and S_x_prime
-        for k in range(K + 1):
-            S_x_block = np.linalg.matrix_power(dynamics.A, k)
-
-            if k == 0:
-                S_x_prime_block = np.zeros((n_states, n_states))
-            else:
-                S_x_prime_block = dynamics.A_prime @ np.linalg.matrix_power(dynamics.A, k - 1)
-
-            S_x[k * n_states : (k + 1) * n_states, :] = S_x_block
-            S_x_prime[k * n_states : (k + 1) * n_states, :] = S_x_prime_block
-
-        # Build S_u and S_u_prime
-        S_u_col = np.zeros((n_states * K, n_inputs))
-        S_u_prime_col = np.zeros((n_states * K, n_inputs))
-
-        for k in range(K):
-            S_u_col_block = np.linalg.matrix_power(dynamics.A, k) @ dynamics.B
-            S_u_col[k * n_states : (k + 1) * n_states, :] = S_u_col_block
-
-        S_u_prime_col[0:n_states, :] = dynamics.B_prime
-        for k in range(1, K):
-            A_pow_k_minus_1 = np.linalg.matrix_power(dynamics.A, k - 1)
-            S_u_prime_col_block = dynamics.A_prime @ A_pow_k_minus_1 @ dynamics.B
-            S_u_prime_col[k * n_states : (k + 1) * n_states, :] = S_u_prime_col_block
-
-        for k in range(K):
-            row_start = (k + 1) * n_states
-            col_start, col_end = k * n_inputs, (k + 1) * n_inputs
-
-            S_u[row_start:, col_start:col_end] = S_u_col[0 : (K - k) * n_states, :]
-            S_u_prime[row_start:, col_start:col_end] = S_u_prime_col[0 : (K - k) * n_states, :]
-
-        return S_x, S_u, S_x_prime, S_u_prime
+        self.linear_cost[...] = 0
 
 
 @dataclass
-class DroneResult:
+class Result:
     """Results from drone trajectory optimization"""
 
-    positions: np.ndarray  # K+1 x 3 matrix, each row is position at a timestep
-    input_positions: np.ndarray  # K x 3 matrix
-    input_velocities: np.ndarray  # K x 3 matrix
-    input_accelerations: np.ndarray  # K x 3 matrix
-    spline_coeffs: np.ndarray  # Spline coefficients for input parameterization
+    pos: np.ndarray  # K+1 x 3 matrix, each row is position at a timestep
+    u_pos: np.ndarray  # K x 3 matrix
+    u_vel: np.ndarray  # K x 3 matrix
+    u_acc: np.ndarray  # K x 3 matrix
+    zeta: np.ndarray | None = None  # Spline coefficients for input parameterization
 
     @staticmethod
-    def generate_initial_drone_result(initial_position: np.ndarray, K: int) -> DroneResult:
-        """Generate initial DroneResult with stationary trajectories at initial position"""
+    def initial_result(initial_pos: NDArray, K: int) -> Result:
+        """Generate initial Result with stationary trajectories at initial position"""
         # Generate position trajectory by replicating initial position
-        positions = np.tile(initial_position, (K + 1, 1))
-        input_positions = np.tile(initial_position, (K, 1))
-        input_velocities = np.zeros((K, 3))
-        input_accelerations = np.zeros((K, 3))
-
-        return DroneResult(
-            positions=positions,
-            input_positions=input_positions,
-            input_velocities=input_velocities,
-            input_accelerations=input_accelerations,
-            spline_coeffs=None,
-        )
+        pos = np.tile(initial_pos, (K + 1, 1))
+        u_pos = np.tile(initial_pos, (K, 1))
+        return Result(pos=pos, u_pos=u_pos, u_vel=np.zeros((K, 3)), u_acc=np.zeros((K, 3)))
 
     def advance_for_next_solve_step(self):
         """Advance trajectories by one step for next solve iteration"""
         # Extrapolate last position by adding the difference between last two positions
-        extrapolated_position = 2 * self.positions[-1] - self.positions[-2]
-        self.positions[:-1] = self.positions[1:]
-        self.positions[-1] = extrapolated_position
+        extrapolated_pos = 2 * self.pos[-1] - self.pos[-2]
+        self.pos[:-1] = self.pos[1:]
+        self.pos[-1] = extrapolated_pos
         # Advance input trajectories - only shift values since we only check first row
-        self.input_positions[:-1] = self.input_positions[1:]
-        self.input_velocities[:-1] = self.input_velocities[1:]
-        self.input_accelerations[:-1] = self.input_accelerations[1:]
+        self.u_pos[:-1] = self.u_pos[1:]
+        self.u_vel[:-1] = self.u_vel[1:]
+        self.u_acc[:-1] = self.u_acc[1:]
 
 
 @dataclass
 class SolverData:
-    """Arguments for drone trajectory optimization"""
+    """Solver data"""
+
+    waypoints: dict[str, NDArray]
 
     current_time: float = 0.0
     obstacle_envelopes: list[np.ndarray] = None
@@ -408,6 +325,9 @@ class SolverData:
     u_0: np.ndarray = field(default_factory=lambda: np.zeros(3))  # Initial input pos reference
     u_dot_0: np.ndarray = field(default_factory=lambda: np.zeros(3))  # Initial input vel reference
     u_ddot_0: np.ndarray = field(default_factory=lambda: np.zeros(3))  # Initial input acc reference
+    zeta: NDArray | None = None
+
+    constraints: list[Constraint] = field(default_factory=lambda: [])
 
 
 @dataclass
@@ -420,8 +340,6 @@ class SolverSettings:
     weights: Weights
     limits: Limits
     mpc: MPCSettings
-
-    data: SolverData = field(default_factory=SolverData)  # TODO: Move out of settings
 
 
 @dataclass
@@ -478,8 +396,8 @@ class Limits:
 
 
 @dataclass
-class SparseDynamics:
-    """Sparse matrices for drone dynamics"""
+class Dynamics:
+    """Matrices for drone dynamics"""
 
     A: np.ndarray  # State transition matrix
     B: np.ndarray  # Input matrix
@@ -508,7 +426,7 @@ def filter_horizon(times: NDArray, t: float, K: int, mpc_freq: float) -> tuple[N
     assert isinstance(times, np.ndarray), "Waypoints must be a numpy array"
     assert times.ndim == 1, "Waypoints must be a 2D array"
     # Round times to nearest discrete time step relative to current time
-    rounded_times = np.round((times - t) * mpc_freq)
+    rounded_times = np.asarray(np.round((times - t) * mpc_freq), dtype=int)
     # Find time steps with waypoints within current horizon
     in_horizon = np.where((rounded_times > 0) & (rounded_times <= K))[0]
     if len(in_horizon) == 0:
@@ -596,3 +514,62 @@ def bernstein_matrices(K: int, N: int, freq: int) -> tuple[NDArray, NDArray, NDA
     W_input = np.concat((W_view, W_dot_view), axis=-1).reshape(-1, W.shape[1])
 
     return W, W_dot, W_ddot, W_input
+
+
+def full_horizon_dynamics_matrices(
+    dynamics: Dynamics, K: int
+) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    """Initialize full horizon dynamics matrices for MPC.
+
+    See thesis document for derivation of these matrices.
+
+    Args:
+        dynamics: Sparse dynamics matrices A, B, A_prime, B_prime
+        K: Number of timesteps in horizon
+
+    Returns:
+        Tuple of (S_x, S_u, S_x_prime, S_u_prime) matrices
+    """
+    n_states = dynamics.A.shape[0]
+    n_inputs = dynamics.B.shape[1]
+
+    # Initialize matrices
+    S_x = np.zeros((n_states * (K + 1), n_states))
+    S_x_prime = np.zeros((n_states * (K + 1), n_states))
+    S_u = np.zeros((n_states * (K + 1), n_inputs * K))
+    S_u_prime = np.zeros((n_states * (K + 1), n_inputs * K))
+
+    # Build S_x and S_x_prime
+    for k in range(K + 1):
+        S_x_block = np.linalg.matrix_power(dynamics.A, k)
+
+        if k == 0:
+            S_x_prime_block = np.zeros((n_states, n_states))
+        else:
+            S_x_prime_block = dynamics.A_prime @ np.linalg.matrix_power(dynamics.A, k - 1)
+
+        S_x[k * n_states : (k + 1) * n_states, :] = S_x_block
+        S_x_prime[k * n_states : (k + 1) * n_states, :] = S_x_prime_block
+
+    # Build S_u and S_u_prime
+    S_u_col = np.zeros((n_states * K, n_inputs))
+    S_u_prime_col = np.zeros((n_states * K, n_inputs))
+
+    for k in range(K):
+        S_u_col_block = np.linalg.matrix_power(dynamics.A, k) @ dynamics.B
+        S_u_col[k * n_states : (k + 1) * n_states, :] = S_u_col_block
+
+    S_u_prime_col[0:n_states, :] = dynamics.B_prime
+    for k in range(1, K):
+        A_pow_k_minus_1 = np.linalg.matrix_power(dynamics.A, k - 1)
+        S_u_prime_col_block = dynamics.A_prime @ A_pow_k_minus_1 @ dynamics.B
+        S_u_prime_col[k * n_states : (k + 1) * n_states, :] = S_u_prime_col_block
+
+    for k in range(K):
+        row_start = (k + 1) * n_states
+        col_start, col_end = k * n_inputs, (k + 1) * n_inputs
+
+        S_u[row_start:, col_start:col_end] = S_u_col[: (K - k) * n_states, :]
+        S_u_prime[row_start:, col_start:col_end] = S_u_prime_col[: (K - k) * n_states, :]
+
+    return S_x, S_u, S_x_prime, S_u_prime

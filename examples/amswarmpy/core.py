@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import numpy as np
+from numpy.typing import NDArray
 
-from .drone import Drone, DroneResult, SolverData, SolverSettings
+from .drone import Drone, Result, SolverData, SolverSettings
 
 
 def solve(
     drones: list[Drone],
     current_time: float,
     initial_states: list[np.ndarray],
-    previous_results: list[DroneResult],
+    waypoints: dict[str, NDArray],
+    previous_results: list[Result],
     settings: SolverSettings,
-) -> tuple[list[bool], list[int], list[DroneResult]]:
+) -> tuple[list[bool], list[int], list[Result]]:
     """Solves the navigation and collision avoidance problem for the entire swarm.
 
     Takes the current time, initial states of each drone, results from previous
@@ -24,7 +26,7 @@ def solve(
         initial_states: List of initial states for each drone. Each initial state consists of
             [x, y, z, vx, vy, vz]
         previous_results: List of results from previous computation for each drone. If no previous
-            results, can initialize with DroneResult.generate_initial_drone_result(...)
+            results, can initialize with Result.initial_result(...)
         settings: Solver settings
 
     Returns:
@@ -58,10 +60,10 @@ def solve(
         for avoid_drone in avoidance_map[i]:
             # Time taken: 5.00e-05 seconds
             intersect = check_intersection(
-                previous_results[i].positions, previous_results[avoid_drone].positions, envelope
+                previous_results[i].pos, previous_results[avoid_drone].pos, envelope
             )
             if intersect:
-                obstacle_positions.append(previous_results[avoid_drone].positions.flatten())
+                obstacle_positions.append(previous_results[avoid_drone].pos.flatten())
                 obstacle_envelopes.append(envelope)
 
         data = SolverData(
@@ -69,14 +71,14 @@ def solve(
             obstacle_positions=obstacle_positions,
             obstacle_envelopes=obstacle_envelopes,
             x_0=initial_states[i],
-            u_0=previous_results[i].input_positions[0],
-            u_dot_0=previous_results[i].input_velocities[0],
-            u_ddot_0=previous_results[i].input_accelerations[0],
+            u_0=previous_results[i].u_pos[0],
+            u_dot_0=previous_results[i].u_vel[0],
+            u_ddot_0=previous_results[i].u_acc[0],
+            waypoints={k: v[:, i] for k, v in waypoints.items()},
         )
-        settings.data = data
 
         # Solve for this drone
-        success, num_iters, result = drones[i].solve(settings)
+        success, num_iters, result = drones[i].solve(data, settings)
         is_success[i] = success
         iters[i] = num_iters
         results[i] = result

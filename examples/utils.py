@@ -60,21 +60,19 @@ def generate_random_positions(
 
 
 def generate_random_waypoints(n_drones, num_waypoints, min_distance=0.5, duration=10.0):
-    max_distance = 1.0
-    time_stamps = np.linspace(0, duration, num_waypoints)
+    time_stamps = np.tile(np.linspace(0, duration, num_waypoints), (n_drones, 1)).T  # [T, n_drones]
     scaling = 2.0 * n_drones ** (1 / 3)
-    starting_positions = generate_random_positions(n_drones, min_distance, max_distance, scaling)
-    drone_waypoints = np.zeros((n_drones, num_waypoints, 10))  # Initialize waypoint array
-    drone_waypoints[..., 0] = time_stamps  # Set time stamps
-    drone_waypoints[:, 0, 1:4] = starting_positions
-
+    pos = np.zeros((num_waypoints, n_drones, 3))
+    vel = np.zeros_like(pos)
+    acc = np.zeros_like(pos)
+    # Initial positions
+    pos[0] = (np.random.rand(n_drones, 3) - 0.5) * 2 * scaling
+    pos[0, :, 2] += scaling
     for i in range(1, num_waypoints):
-        drone_waypoints[:, i, 1:4] = generate_random_positions(
-            n_drones, min_distance, max_distance, scaling, drone_waypoints[:, i - 1, 1:4]
-        )
-
-    waypoints = {i: drone_waypoints[i] for i in range(n_drones)}
-    return waypoints
+        # Random walk for each drone, ensure z stays positive
+        pos[i] = pos[i - 1] + (np.random.rand(n_drones, 3) - 0.5) * min_distance
+        pos[i, :, 2] = np.clip(pos[i, :, 2], 0.1, 10)
+    return {"time": time_stamps, "pos": pos, "vel": vel, "acc": acc}
 
 
 def draw_line(

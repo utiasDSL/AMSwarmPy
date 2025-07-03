@@ -33,15 +33,17 @@ def simulate(waypoints):
 
     Returns a dict with 'positions', 'timestamps', and timing info.
     """
-    with open(Path(__file__).resolve().parents[1] / "params/model_params.yaml") as f:
+    with open(Path(__file__).resolve().parents[1] / "params/settings.yaml") as f:
         settings = yaml.safe_load(f)
 
-    num_drones = len(waypoints)
-    initial_positions = {k: waypoints[k][0, 1:4] for k in waypoints}
+    num_drones = waypoints["pos"].shape[1]
+    initial_positions = {i: waypoints["pos"][0, i] for i in range(num_drones)}
 
     # Setup simulation parameters
-    mpc_freq = settings["MPCConfig"]["mpc_freq"]
-    duration_sec = 10.0
+    mpc_freq = settings["MPCSettings"]["freq"]
+    duration_sec = (
+        waypoints["time"][-1, 0] if waypoints["time"].ndim == 2 else waypoints["time"][-1]
+    )
     num_steps = int(duration_sec * mpc_freq)
 
     # Initialize results storage
@@ -49,51 +51,52 @@ def simulate(waypoints):
         "positions": {i: [] for i in range(num_drones)},
         "timestamps": np.linspace(0, duration_sec, num_steps),
     }
-
-    # Timing storage
     timings = {"solve_times": [], "advance_times": [], "solve_steps": []}
 
     t0 = time.perf_counter()
     drone_results = [
-        amswarmpy.DroneResult.generate_initial_drone_result(
-            initial_positions[k], settings["MPCConfig"]["K"]
-        )
-        for k in waypoints
+        amswarmpy.Result.initial_result(initial_positions[i], settings["MPCSettings"]["K"])
+        for i in range(num_drones)
     ]
     t1 = time.perf_counter()
     timings["init_time"] = t1 - t0
 
-    # Initialize drones and swarm
-    amswarm_kwargs = {
-        "solver_config": amswarmpy.AMSolverConfig(**settings["AMSolverConfig"]),
-        "mpc_config": amswarmpy.MPCConfig(**settings["MPCConfig"]),
-        "weights": amswarmpy.MPCWeights(**settings["MPCWeights"]),
-        "limits": amswarmpy.PhysicalLimits(**settings["PhysicalLimits"]),
-        "dynamics": amswarmpy.SparseDynamics(**settings["Dynamics"]),
-    }
-
-    drones = [amswarmpy.Drone(waypoints=waypoints[key], **amswarm_kwargs) for key in waypoints]
-    swarm = amswarmpy.Swarm(drones)
+    constraint_settings = amswarmpy.ConstraintSettings(
+        pos=True, vel=False, acc=False, input_continuity=True
+    )
+    weights = amswarmpy.Weights(**settings["Weights"])
+    limits = amswarmpy.Limits(**settings["Limits"])
+    mpc_settings = amswarmpy.MPCSettings(**settings["MPCSettings"])
+    solver_settings = amswarmpy.SolverSettings(
+        **settings["SolverSettings"],
+        constraints=constraint_settings,
+        weights=weights,
+        limits=limits,
+        mpc=mpc_settings,
+    )
+    dynamics = amswarmpy.Dynamics(**settings["Dynamics"])
+    drones = [
+        amswarmpy.Drone(settings=solver_settings, dynamics=dynamics) for _ in range(num_drones)
+    ]
 
     # Set initial states
-    initial_states = [np.concatenate((initial_positions[k], [0, 0, 0])) for k in waypoints]
-    constraint_configs = [amswarmpy.ConstraintConfig() for k in waypoints]
-
-    t0 = time.perf_counter()
-    drone_results = solve_swarm(swarm, 0, initial_states, drone_results, constraint_configs)
-    t1 = time.perf_counter()
-    timings["solve_times"].append(t1 - t0)
-    current_positions = {k: initial_positions[k] for k in waypoints}
+    initial_states = np.concatenate((waypoints["pos"][0], np.zeros((num_drones, 3))), axis=-1)
+    solve_success, iters, drone_results = amswarmpy.solve(
+        drones, 0, initial_states, waypoints, drone_results, solver_settings
+    )
+    if not all(solve_success):
+        print("Warning: Solver failed to find a valid solution")
+    current_positions = waypoints["pos"][0]
 
     # Main simulation loop
     for step in range(num_steps):
         current_time = step / mpc_freq
 
         if step % int(mpc_freq) == 0:
-            initial_states = [np.concatenate((current_positions[k], [0, 0, 0])) for k in waypoints]
+            initial_states = np.concatenate((current_positions, np.zeros((num_drones, 3))), axis=-1)
             t0 = time.perf_counter()
-            drone_results = solve_swarm(
-                swarm, current_time, initial_states, drone_results, constraint_configs
+            solve_success, iters, drone_results = amswarmpy.solve(
+                drones, current_time, initial_states, waypoints, drone_results, solver_settings
             )
             t1 = time.perf_counter()
             timings["solve_times"].append(t1 - t0)
@@ -104,7 +107,7 @@ def simulate(waypoints):
             timings["advance_times"].append(t3 - t2)
 
         for i, result in enumerate(drone_results):
-            planned_pos = result.position_trajectory[step % int(mpc_freq), :]
+            planned_pos = result.pos[step % int(mpc_freq), :]
             current_positions[i] = planned_pos
             results["positions"][i].append(planned_pos)
 
@@ -125,7 +128,7 @@ def plot_trajectories(results, waypoints, filename="trajectories.png"):
     for drone_id in results["positions"]:
         pos = np.array(results["positions"][drone_id])
         ax.plot(pos[:, 0], pos[:, 1], pos[:, 2], label=f"Drone {drone_id} Trajectory")
-        wpts = waypoints[drone_id][:, 1:4]
+        wpts = waypoints["pos"][:, drone_id, :]
         ax.scatter(wpts[:, 0], wpts[:, 1], wpts[:, 2], marker="*", s=100)
 
     ax.set_xlabel("X")
@@ -143,11 +146,11 @@ def check_swarm_success(results, waypoints, tol=0.1):
     Check if at least 50% of drones reach their final waypoint within tol (meters).
     Returns True if successful, False otherwise.
     """
-    num_drones = len(waypoints)
+    num_drones = waypoints["pos"].shape[1]
     num_success = 0
     for i in range(num_drones):
         final_pos = np.array(results["positions"][i][-1])
-        goal = waypoints[i][-1, 1:4]
+        goal = waypoints["pos"][-1, i, :]
         if np.linalg.norm(final_pos - goal) <= tol:
             num_success += 1
     return num_success >= num_drones / 2

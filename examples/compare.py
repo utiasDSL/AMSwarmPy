@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import amswarm
 import amswarmpy
 import fire
+import jax
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
@@ -16,6 +17,10 @@ from utils import draw_line, draw_points
 if TYPE_CHECKING:
     from crazyflow import Sim
     from numpy.typing import NDArray
+
+jax.config.update("jax_platform_name", "cpu")
+jax.config.update("jax_enable_x64", True)
+
 
 np.random.seed(0)
 rgbas = np.random.rand(5, 4)
@@ -294,9 +299,13 @@ def main(render: bool = False):
     sim = Sim(n_drones=5, freq=400, state_freq=80, attitude_freq=400, control="state")
     n_points = 7
     waypoints = generate_waypoints(sim.n_drones, n_points=n_points)
+    results_amswarm = simulate_amswarm(sim, waypoints, render=render)
 
     results_amswarm = None
-    # results_amswarm = simulate_amswarm(sim, waypoints, render=render)
+    t1 = time.perf_counter()
+    results_amswarm = simulate_amswarm(sim, waypoints, render=render)
+    t2 = time.perf_counter()
+    print(f"AMSwarm (cpp) time: {t2 - t1:.2f} seconds")
     tstart = time.perf_counter()
     results_amswarmpy = None
     results_amswarmpy = simulate_amswarmpy(sim, waypoints, render=render)

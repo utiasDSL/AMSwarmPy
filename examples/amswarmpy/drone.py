@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import partial
 
+import jax
+import jax.numpy as jp
 import numpy as np
+from einops import rearrange
+from jax import Array
 from numpy.typing import NDArray
-from scipy.special import comb
 
 from .constraint import (
     Constraint,
@@ -12,6 +16,7 @@ from .constraint import (
     InequalityConstraint,
     PolarInequalityConstraint,
 )
+from .spline import bernstein_input, bernstein_matrices
 
 
 class Drone:
@@ -29,8 +34,15 @@ class Drone:
     def __init__(self, settings: SolverSettings, dynamics: Dynamics):
         # Initialize Bernstein and dynamics matrices
         K, N = settings.mpc.K, settings.mpc.N
-        self.W, self.W_dot, self.W_ddot, W_input = bernstein_matrices(K, N, settings.mpc.freq)
-        self.S_x, S_u, S_x_prime, S_u_prime = full_horizon_dynamics_matrices(dynamics, K)
+        W, W_dot, W_ddot = bernstein_matrices(K, N, settings.mpc.freq)
+        self.W, self.W_dot, self.W_ddot = np.asarray(W), np.asarray(W_dot), np.asarray(W_ddot)
+        W_input = np.asarray(bernstein_input(self.W, self.W_dot))
+
+        S_x, S_u, S_x_prime, S_u_prime = full_horizon_dynamics(
+            dynamics.A, dynamics.B, dynamics.A_prime, dynamics.B_prime, K
+        )
+        self.S_x = np.asarray(S_x)
+        S_u, S_x_prime, S_u_prime = np.asarray(S_u), np.asarray(S_x_prime), np.asarray(S_u_prime)
         # Precompute matrices that don't change at solve time
         self.S_u_W_input = S_u @ W_input
 
@@ -436,89 +448,10 @@ def filter_horizon(times: NDArray, t: float, K: int, mpc_freq: float) -> tuple[N
     return in_horizon, rounded_times[in_horizon]
 
 
-def bernstein_matrices(K: int, N: int, freq: int) -> tuple[NDArray, NDArray, NDArray, NDArray]:
-    """Initialize Bernstein polynomial matrices used for input parameterization.
-
-    Args:
-        mpc_settings: MPC configuration parameters
-
-    Returns:
-        Tuple of (W, W_dot, W_ddot, W_input) matrices where:
-        - W: Position basis matrix
-        - W_dot: Velocity basis matrix
-        - W_ddot: Acceleration basis matrix
-        - W_input: Combined position/velocity input matrix
-    """
-    W = np.zeros((3 * K, 3 * (N + 1)))
-    W_dot = np.zeros((3 * K, 3 * (N + 1)))
-    W_ddot = np.zeros((3 * K, 3 * (N + 1)))
-
-    t_f = (K - 1) / freq
-
-    for k in range(K):
-        t = k / freq
-        t_f_minus_t = t_f - t
-        t_pow_n = t_f**N
-
-        for m in range(N + 1):
-            n_choose_m = comb(N, m, exact=True)
-            # Position basis
-            val = (t**m) * n_choose_m * (t_f_minus_t ** (N - m)) / t_pow_n
-
-            # Velocity basis
-            if k == 0 and m == 0:
-                dot_val = -N / t_f
-            elif k == (K - 1) and m == N:
-                dot_val = N / t_f
-            else:
-                dot_val = (
-                    t_f**-N
-                    * n_choose_m
-                    * (
-                        m * (t ** (m - 1)) * (t_f_minus_t ** (N - m))
-                        - (t**m) * (N - m) * (t_f_minus_t ** (N - m - 1))
-                    )
-                )
-
-            # Acceleration basis
-            if k == 0 and m == 0:
-                dotdot_val = N * (N - 1) / (t_f**2)
-            elif k == K - 1 and m == N:
-                dotdot_val = N * (N - 1) / (t_f**2)
-            elif k == 0 and m == 1:
-                dotdot_val = -2 * N * (N - 1) / (t_f**2)
-            elif k == K - 1 and m == N - 1:
-                dotdot_val = -2 * N * (N - 1) / (t_f**2)
-            else:
-                dotdot_val = (
-                    (t_f**-N)
-                    * n_choose_m
-                    * (
-                        m * (m - 1) * (t ** (m - 2)) * (t_f_minus_t ** (N - m))
-                        - 2 * m * (N - m) * (t ** (m - 1)) * (t_f_minus_t ** (N - m - 1))
-                        + (N - m) * (N - m - 1) * (t**m) * (t_f_minus_t ** (N - m - 2))
-                    )
-                )
-
-            # Fill matrices if values are non-zero
-            row_idx = [3 * k, 3 * k + 1, 3 * k + 2]
-            col_idx = [m, m + N + 1, m + 2 * (N + 1)]
-
-            W[row_idx, col_idx] = val
-            W_dot[row_idx, col_idx] = dot_val
-            W_ddot[row_idx, col_idx] = dotdot_val
-
-    # Matrix of rows [x0, y0, z0, vx0, vy0, vz0, x1, y1, z1, vx1, vy1, vz1, ...]
-    W_view = W.reshape(-1, W.shape[1] * 3)
-    W_dot_view = W_dot.reshape(-1, W_dot.shape[1] * 3)
-    W_input = np.concat((W_view, W_dot_view), axis=-1).reshape(-1, W.shape[1])
-
-    return W, W_dot, W_ddot, W_input
-
-
-def full_horizon_dynamics_matrices(
-    dynamics: Dynamics, K: int
-) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+@partial(jax.jit, static_argnames=("K"))
+def full_horizon_dynamics(
+    A: Array, B: Array, A_prime: Array, B_prime: Array, K: int
+) -> tuple[Array, Array, Array, Array]:
     """Initialize full horizon dynamics matrices for MPC.
 
     See thesis document for derivation of these matrices.
@@ -530,46 +463,25 @@ def full_horizon_dynamics_matrices(
     Returns:
         Tuple of (S_x, S_u, S_x_prime, S_u_prime) matrices
     """
-    n_states = dynamics.A.shape[0]
-    n_inputs = dynamics.B.shape[1]
+    n_states = A.shape[0]
+    n_inputs = B.shape[1]
+    A_pow = jax.lax.scan(lambda X, _: (A @ X, X), jp.eye(n_states), length=K + 1)[1]
+    S_x = rearrange(A_pow, "k n d -> (k n) d")
+    S_x_prime = rearrange(A_pow[:-1] @ A_prime, "k n d -> (k n) d")  # Time step 1 to K
+    S_x_prime = jp.concat((jp.zeros((n_states, n_states)), S_x_prime), axis=0)
+    # U matrices
+    S_u_single = rearrange(A_pow[:-1] @ B, "k n d -> (k n) d")
+    A_prime_A_pow_B = rearrange(A_prime @ A_pow[:-1] @ B, "k n d -> (k n) d")
+    S_u_prime_single = jp.concat((B_prime, A_prime_A_pow_B), axis=0)
 
-    # Initialize matrices
-    S_x = np.zeros((n_states * (K + 1), n_states))
-    S_x_prime = np.zeros((n_states * (K + 1), n_states))
-    S_u = np.zeros((n_states * (K + 1), n_inputs * K))
-    S_u_prime = np.zeros((n_states * (K + 1), n_inputs * K))
-
-    # Build S_x and S_x_prime
-    for k in range(K + 1):
-        S_x_block = np.linalg.matrix_power(dynamics.A, k)
-
-        if k == 0:
-            S_x_prime_block = np.zeros((n_states, n_states))
-        else:
-            S_x_prime_block = dynamics.A_prime @ np.linalg.matrix_power(dynamics.A, k - 1)
-
-        S_x[k * n_states : (k + 1) * n_states, :] = S_x_block
-        S_x_prime[k * n_states : (k + 1) * n_states, :] = S_x_prime_block
-
-    # Build S_u and S_u_prime
-    S_u_col = np.zeros((n_states * K, n_inputs))
-    S_u_prime_col = np.zeros((n_states * K, n_inputs))
-
-    for k in range(K):
-        S_u_col_block = np.linalg.matrix_power(dynamics.A, k) @ dynamics.B
-        S_u_col[k * n_states : (k + 1) * n_states, :] = S_u_col_block
-
-    S_u_prime_col[0:n_states, :] = dynamics.B_prime
-    for k in range(1, K):
-        A_pow_k_minus_1 = np.linalg.matrix_power(dynamics.A, k - 1)
-        S_u_prime_col_block = dynamics.A_prime @ A_pow_k_minus_1 @ dynamics.B
-        S_u_prime_col[k * n_states : (k + 1) * n_states, :] = S_u_prime_col_block
-
+    # TODO: Improve by vectorizing or scanning?
+    S_u = jp.zeros((n_states * (K + 1), n_inputs * K))
+    S_u_prime = jp.zeros((n_states * (K + 1), n_inputs * K))
     for k in range(K):
         row_start = (k + 1) * n_states
         col_start, col_end = k * n_inputs, (k + 1) * n_inputs
-
-        S_u[row_start:, col_start:col_end] = S_u_col[: (K - k) * n_states, :]
-        S_u_prime[row_start:, col_start:col_end] = S_u_prime_col[: (K - k) * n_states, :]
-
+        S_u = S_u.at[row_start:, col_start:col_end].set(S_u_single[: (K - k) * n_states, :])
+        S_u_prime = S_u_prime.at[row_start:, col_start:col_end].set(
+            S_u_prime_single[: (K - k) * n_states, :]
+        )
     return S_x, S_u, S_x_prime, S_u_prime

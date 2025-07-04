@@ -64,7 +64,7 @@ class SolverData:
     @staticmethod
     def init(waypoints: dict[str, NDArray], K: int, N: int) -> SolverData:
         n_drones = waypoints["pos"].shape[1]
-        trajectory = [Trajectory.init(waypoints["pos"][k, 0], K) for k in range(n_drones)]
+        trajectory = [Trajectory.init(waypoints["pos"][0, k], K) for k in range(n_drones)]
         # Init optimization variable
         zeta = np.zeros((n_drones, 3 * (N + 1)))
         return SolverData(

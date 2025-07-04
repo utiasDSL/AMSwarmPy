@@ -4,7 +4,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .constraint import EqualityConstraint, InequalityConstraint, PolarInequalityConstraint
-from .data import SolverData, SolverSettings
+from .data import SolverData
+from .settings import SolverSettings
 
 
 def solve_swarm(

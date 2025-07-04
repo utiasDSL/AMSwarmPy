@@ -33,12 +33,13 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     wp_idx = np.repeat(steps, 3) * 3 + np.tile(np.arange(3, dtype=int), len(steps))
 
     # Output smoothness cost
-    data.cost.linear += data.cost.linear_smoothness_const @ data.x_0
+    x_0 = data.x_0[data.rank]
+    data.cost.linear += data.cost.linear_smoothness_const @ x_0
 
     # --- Add constraints - see thesis document for derivations ---
     # Waypoint position cost and/or equality constraint
     G_wp = data.matrices.M_p_S_u_W_input[wp_idx]
-    h_wp = des_pos - data.matrices.M_p_S_x[wp_idx] @ data.x_0
+    h_wp = des_pos - data.matrices.M_p_S_x[wp_idx] @ x_0
     data.cost.quad += 2 * settings.weights.pos * G_wp.T @ G_wp
     data.cost.linear += -2 * settings.weights.pos * G_wp.T @ h_wp
     if settings.constraints.pos:
@@ -46,7 +47,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
 
     # Waypoint velocity cost and/or equality constraint
     G_wv = data.matrices.M_v_S_u_W_input[wp_idx]
-    h_wv = des_vel - data.matrices.M_v_S_x[wp_idx] @ data.x_0
+    h_wv = des_vel - data.matrices.M_v_S_x[wp_idx] @ x_0
     data.cost.quad += 2 * settings.weights.vel * G_wv.T @ G_wv
     data.cost.linear += -2 * settings.weights.vel * G_wv.T @ h_wv
     if settings.constraints.vel:
@@ -54,7 +55,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
 
     # Waypoint acceleration cost and/or equality constraint
     G_wa = data.matrices.M_a_S_u_prime_W_input[wp_idx]
-    h_wa = des_acc - data.matrices.M_a_S_x_prime[wp_idx] @ data.x_0
+    h_wa = des_acc - data.matrices.M_a_S_x_prime[wp_idx] @ x_0
     data.cost.quad += 2 * settings.weights.acc * G_wa.T @ G_wa
     data.cost.linear += -2 * settings.weights.acc * G_wa.T @ h_wa
     if settings.constraints.acc:
@@ -69,13 +70,13 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
         )
 
     # Position constraint
-    upper = np.tile(settings.limits.pos_max, K + 1) - data.matrices.M_p_S_x @ data.x_0
-    lower = -np.tile(settings.limits.pos_min, K + 1) + data.matrices.M_p_S_x @ data.x_0
+    upper = np.tile(settings.limits.pos_max, K + 1) - data.matrices.M_p_S_x @ x_0
+    lower = -np.tile(settings.limits.pos_min, K + 1) + data.matrices.M_p_S_x @ x_0
     h_p = np.concatenate([upper, lower])
     data.constraints.append(InequalityConstraint(data.matrices.G_p, h_p, settings.mpc.pos_tol))
 
     # Velocity constraint
-    c_v = data.matrices.M_v_S_x @ data.x_0
+    c_v = data.matrices.M_v_S_x @ x_0
     data.constraints.append(
         PolarInequalityConstraint(
             data.matrices.M_v_S_u_W_input,
@@ -88,7 +89,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     )
 
     # Acceleration constraint
-    c_a = data.matrices.M_a_S_x_prime @ data.x_0
+    c_a = data.matrices.M_a_S_x_prime @ x_0
     data.constraints.append(
         PolarInequalityConstraint(
             data.matrices.M_a_S_u_prime_W_input,
@@ -104,7 +105,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     for pos, envelope in zip(data.obstacle_positions, data.obstacle_envelopes, strict=True):
         envelope = np.tile(envelope, K + 1)
         G_c = envelope[:, None] * data.matrices.M_p_S_u_W_input
-        c_c = envelope * (data.matrices.M_p_S_x @ data.x_0 - pos)
+        c_c = envelope * (data.matrices.M_p_S_x @ x_0 - pos)
         data.constraints.append(
             PolarInequalityConstraint(
                 G_c,
@@ -122,9 +123,10 @@ def spline2states(data: SolverData, settings: SolverSettings) -> SolverData:
     """Extract position, velocity, and acceleration trajectories from solution coefficients."""
     K = settings.mpc.K
     # Extract position trajectory from state trajectory
-    pos = (data.matrices.S_x @ data.x_0 + data.matrices.S_u_W_input @ data.zeta).T.reshape(
-        (K + 1, 6)
-    )[:, :3]
+    x_0 = data.x_0[data.rank]
+    pos = (data.matrices.S_x @ x_0 + data.matrices.S_u_W_input @ data.zeta).T.reshape((K + 1, 6))[
+        :, :3
+    ]
     # Get input position, velocity and acceleration from spline coefficients
     u_pos = (data.matrices.W @ data.zeta).T.reshape((K, 3))
     u_vel = (data.matrices.W_dot @ data.zeta).T.reshape((K, 3))

@@ -22,6 +22,8 @@ def solve_swarm(
     iters = np.zeros(n_drones)
 
     # Solve for each drone
+    data.x_0 = states
+    data.current_time = t
     for i in range(n_drones):
         obstacle_positions = []
         obstacle_envelopes = []
@@ -37,14 +39,11 @@ def solve_swarm(
                 obstacle_envelopes.append(envelope)
 
         data.rank = i
-        data.current_time = t
         data.obstacle_positions = obstacle_positions
         data.obstacle_envelopes = obstacle_envelopes
-        data.x_0 = states[i]
         data.u_0 = data.previous_results[i].u_pos[0]
         data.u_dot_0 = data.previous_results[i].u_vel[0]
         data.u_ddot_0 = data.previous_results[i].u_acc[0]
-        data.waypoints = {k: v[:, i] for k, v in waypoints.items()}
 
         # Solve for this drone
         success, num_iters, data = solve_drone(data, settings)

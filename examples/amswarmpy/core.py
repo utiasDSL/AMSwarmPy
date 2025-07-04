@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from .drone import Drone, Result, SolverData, SolverSettings
+from .drone import Drone, SolverData, SolverSettings
 
 
 def solve(
@@ -11,9 +11,9 @@ def solve(
     current_time: float,
     initial_states: list[np.ndarray],
     waypoints: dict[str, NDArray],
-    previous_results: list[Result],
+    data: SolverData,
     settings: SolverSettings,
-) -> tuple[list[bool], list[int], list[Result]]:
+) -> tuple[list[bool], list[int], SolverData]:
     """Solves the navigation and collision avoidance problem for the entire swarm.
 
     Takes the current time, initial states of each drone, results from previous
@@ -37,7 +37,7 @@ def solve(
     """
     # Validate input sizes
     n_drones = len(drones)
-    if len(initial_states) != n_drones or len(previous_results) != n_drones:
+    if len(initial_states) != n_drones or len(data.previous_results) != n_drones:
         raise ValueError("Input lists must all have same length as number of drones in swarm")
     assert isinstance(settings, SolverSettings), f"Unexpected type: {type(settings)}"
 
@@ -49,7 +49,6 @@ def solve(
     # Initialize results
     is_success = np.zeros(n_drones, dtype=bool)
     iters = np.zeros(n_drones)
-    results = [None] * n_drones
 
     # Solve for each drone
     for i in range(n_drones):
@@ -60,30 +59,28 @@ def solve(
         for avoid_drone in avoidance_map[i]:
             # Time taken: 5.00e-05 seconds
             intersect = check_intersection(
-                previous_results[i].pos, previous_results[avoid_drone].pos, envelope
+                data.previous_results[i].pos, data.previous_results[avoid_drone].pos, envelope
             )
             if intersect:
-                obstacle_positions.append(previous_results[avoid_drone].pos.flatten())
+                obstacle_positions.append(data.previous_results[avoid_drone].pos.flatten())
                 obstacle_envelopes.append(envelope)
 
-        data = SolverData(
-            current_time=current_time,
-            obstacle_positions=obstacle_positions,
-            obstacle_envelopes=obstacle_envelopes,
-            x_0=initial_states[i],
-            u_0=previous_results[i].u_pos[0],
-            u_dot_0=previous_results[i].u_vel[0],
-            u_ddot_0=previous_results[i].u_acc[0],
-            waypoints={k: v[:, i] for k, v in waypoints.items()},
-        )
+        data.rank = i
+        data.current_time = current_time
+        data.obstacle_positions = obstacle_positions
+        data.obstacle_envelopes = obstacle_envelopes
+        data.x_0 = initial_states[i]
+        data.u_0 = data.previous_results[i].u_pos[0]
+        data.u_dot_0 = data.previous_results[i].u_vel[0]
+        data.u_ddot_0 = data.previous_results[i].u_acc[0]
+        data.waypoints = {k: v[:, i] for k, v in waypoints.items()}
 
         # Solve for this drone
-        success, num_iters, result = drones[i].solve(data, settings)
+        success, num_iters, data = drones[i].solve(data, settings)
         is_success[i] = success
         iters[i] = num_iters
-        results[i] = result
 
-    return is_success, iters, results
+    return is_success, iters, data
 
 
 def check_intersection(traj1: np.ndarray, traj2: np.ndarray, envelope: np.ndarray) -> bool:

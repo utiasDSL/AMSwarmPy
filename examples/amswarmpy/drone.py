@@ -31,52 +31,6 @@ class Drone:
         dynamics: Dynamics matrices for the drone
     """
 
-    def __init__(self, settings: SolverSettings, dynamics: Dynamics):
-        # Initialize Bernstein and dynamics matrices
-        K, N = settings.mpc.K, settings.mpc.N
-        W, W_dot, W_ddot = bernstein_matrices(K, N, settings.mpc.freq)
-        self.W, self.W_dot, self.W_ddot = np.asarray(W), np.asarray(W_dot), np.asarray(W_ddot)
-        W_input = np.asarray(bernstein_input(self.W, self.W_dot))
-
-        S_x, S_u, S_x_prime, S_u_prime = full_horizon_dynamics(
-            dynamics.A, dynamics.B, dynamics.A_prime, dynamics.B_prime, K
-        )
-        self.S_x = np.asarray(S_x)
-        S_u, S_x_prime, S_u_prime = np.asarray(S_u), np.asarray(S_x_prime), np.asarray(S_u_prime)
-        # Precompute matrices that don't change at solve time
-        self.S_u_W_input = S_u @ W_input
-
-        # Create an index of 0:3, 6:9, 12:15, ...
-        p_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., :3].flatten()
-        # Create an index of 3:6, 9:12, 15:18, ...
-        v_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
-        a_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
-        self.M_p_S_u_W_input = self.S_u_W_input[p_idx]
-        self.M_v_S_u_W_input = self.S_u_W_input[v_idx]
-        self.M_a_S_u_prime_W_input = S_u_prime[a_idx] @ W_input
-
-        self.M_p_S_x = self.S_x[p_idx]
-        self.M_v_S_x = self.S_x[v_idx]
-        self.M_a_S_x_prime = S_x_prime[a_idx]
-
-        # Precompute constraint matrices
-        self.G_u = np.concat((self.W[:3], self.W_dot[:3], self.W_ddot[:3]))
-        self.G_p = np.concat((self.M_p_S_u_W_input, -self.M_p_S_u_W_input))
-
-        # Initialize cost matrices
-        weights = settings.weights
-        self.initial_quad_cost = 2 * weights.input_smoothness * (self.W_ddot.T @ self.W_ddot)
-        self.initial_quad_cost += (
-            2 * weights.smoothness * W_input.T @ S_u_prime[a_idx].T @ S_u_prime[a_idx] @ W_input
-        )
-
-        self.initial_quad_cost += 2 * weights.input_continuity * self.G_u.T @ self.G_u
-        self.quad_cost = self.initial_quad_cost.copy()
-        self.linear_cost = np.zeros(3 * (settings.mpc.N + 1))
-        self.linear_cost_smoothness_const_term = (
-            2 * weights.smoothness * self.M_a_S_u_prime_W_input.T @ self.M_a_S_x_prime
-        )
-
     def pre_solve(self, data: SolverData, settings: SolverSettings):
         """Setup optimization problem before solving.
 
@@ -86,7 +40,7 @@ class Drone:
         # [k, x, y, z, vx, vy, vz, ax, ay, az]. k is discrete STEP in current horizon
         K, freq = settings.mpc.K, settings.mpc.freq
         if data.zeta is None:
-            data.zeta = np.zeros(self.quad_cost.shape[0])  # Init optimization variable
+            data.zeta = np.zeros(data.cost.quad_cost.shape[0])  # Init optimization variable
 
         mask, steps = filter_horizon(data.waypoints["time"], data.current_time, K, freq)
         # Separate and reshape waypoints into position, velocity, and acceleration vectors
@@ -100,52 +54,52 @@ class Drone:
 
         # Plot the waypoint selection matrix
         # Output smoothness cost
-        self.linear_cost += self.linear_cost_smoothness_const_term @ data.x_0
+        data.cost.linear_cost += data.cost.linear_cost_smoothness_const_term @ data.x_0
 
         # --- Add constraints - see thesis document for derivations ---
         # Waypoint position cost and/or equality constraint
-        G_wp = self.M_p_S_u_W_input[wp_idx]
-        h_wp = des_pos - self.M_p_S_x[wp_idx] @ data.x_0
-        self.quad_cost += 2 * settings.weights.pos * G_wp.T @ G_wp
-        self.linear_cost += -2 * settings.weights.pos * G_wp.T @ h_wp
+        G_wp = data.matrices.M_p_S_u_W_input[wp_idx]
+        h_wp = des_pos - data.matrices.M_p_S_x[wp_idx] @ data.x_0
+        data.cost.quad_cost += 2 * settings.weights.pos * G_wp.T @ G_wp
+        data.cost.linear_cost += -2 * settings.weights.pos * G_wp.T @ h_wp
         if settings.constraints.pos:
             data.constraints.append(EqualityConstraint(G_wp, h_wp, settings.mpc.waypoints_pos_tol))
 
         # Waypoint velocity cost and/or equality constraint
-        G_wv = self.M_v_S_u_W_input[wp_idx]
-        h_wv = des_vel - self.M_v_S_x[wp_idx] @ data.x_0
-        self.quad_cost += 2 * settings.weights.vel * G_wv.T @ G_wv
-        self.linear_cost += -2 * settings.weights.vel * G_wv.T @ h_wv
+        G_wv = data.matrices.M_v_S_u_W_input[wp_idx]
+        h_wv = des_vel - data.matrices.M_v_S_x[wp_idx] @ data.x_0
+        data.cost.quad_cost += 2 * settings.weights.vel * G_wv.T @ G_wv
+        data.cost.linear_cost += -2 * settings.weights.vel * G_wv.T @ h_wv
         if settings.constraints.vel:
             data.constraints.append(EqualityConstraint(G_wv, h_wv, settings.mpc.waypoints_vel_tol))
 
         # Waypoint acceleration cost and/or equality constraint
-        G_wa = self.M_a_S_u_prime_W_input[wp_idx]
-        h_wa = des_acc - self.M_a_S_x_prime[wp_idx] @ data.x_0
-        self.quad_cost += 2 * settings.weights.acc * G_wa.T @ G_wa
-        self.linear_cost += -2 * settings.weights.acc * G_wa.T @ h_wa
+        G_wa = data.matrices.M_a_S_u_prime_W_input[wp_idx]
+        h_wa = des_acc - data.matrices.M_a_S_x_prime[wp_idx] @ data.x_0
+        data.cost.quad_cost += 2 * settings.weights.acc * G_wa.T @ G_wa
+        data.cost.linear_cost += -2 * settings.weights.acc * G_wa.T @ h_wa
         if settings.constraints.acc:
             data.constraints.append(EqualityConstraint(G_wa, h_wa, settings.mpc.waypoints_acc_tol))
 
         # Input continuity cost and/or equality constraint
         h_u = np.concatenate([data.u_0, data.u_dot_0, data.u_ddot_0])
-        self.linear_cost += -2 * settings.weights.input_continuity * self.G_u.T @ h_u
+        data.cost.linear_cost += -2 * settings.weights.input_continuity * data.matrices.G_u.T @ h_u
         if settings.constraints.input_continuity:
             data.constraints.append(
-                EqualityConstraint(self.G_u, h_u, settings.mpc.input_continuity_tol)
+                EqualityConstraint(data.matrices.G_u, h_u, settings.mpc.input_continuity_tol)
             )
 
         # Position constraint
-        upper = np.tile(settings.limits.pos_max, K + 1) - self.M_p_S_x @ data.x_0
-        lower = -np.tile(settings.limits.pos_min, K + 1) + self.M_p_S_x @ data.x_0
+        upper = np.tile(settings.limits.pos_max, K + 1) - data.matrices.M_p_S_x @ data.x_0
+        lower = -np.tile(settings.limits.pos_min, K + 1) + data.matrices.M_p_S_x @ data.x_0
         h_p = np.concatenate([upper, lower])
-        data.constraints.append(InequalityConstraint(self.G_p, h_p, settings.mpc.pos_tol))
+        data.constraints.append(InequalityConstraint(data.matrices.G_p, h_p, settings.mpc.pos_tol))
 
         # Velocity constraint
-        c_v = self.M_v_S_x @ data.x_0
+        c_v = data.matrices.M_v_S_x @ data.x_0
         data.constraints.append(
             PolarInequalityConstraint(
-                self.M_v_S_u_W_input,
+                data.matrices.M_v_S_u_W_input,
                 c_v,
                 -float("inf"),
                 settings.limits.vel_max,
@@ -155,10 +109,10 @@ class Drone:
         )
 
         # Acceleration constraint
-        c_a = self.M_a_S_x_prime @ data.x_0
+        c_a = data.matrices.M_a_S_x_prime @ data.x_0
         data.constraints.append(
             PolarInequalityConstraint(
-                self.M_a_S_u_prime_W_input,
+                data.matrices.M_a_S_u_prime_W_input,
                 c_a,
                 -float("inf"),
                 settings.limits.acc_max,
@@ -170,8 +124,8 @@ class Drone:
         # Collision constraints
         for pos, envelope in zip(data.obstacle_positions, data.obstacle_envelopes, strict=True):
             envelope = np.tile(envelope, K + 1)
-            G_c = envelope[:, None] * self.M_p_S_u_W_input
-            c_c = envelope * (self.M_p_S_x @ data.x_0 - pos)
+            G_c = envelope[:, None] * data.matrices.M_p_S_u_W_input
+            c_c = envelope * (data.matrices.M_p_S_x @ data.x_0 - pos)
             data.constraints.append(
                 PolarInequalityConstraint(
                     G_c,
@@ -184,7 +138,7 @@ class Drone:
             )
         return data
 
-    def post_solve(self, data: SolverData, settings: SolverSettings) -> Result:
+    def post_solve(self, data: SolverData, settings: SolverSettings) -> SolverData:
         """Process optimization results into Result object.
 
         Override of AMSolver method that extracts trajectories from solution.
@@ -201,13 +155,17 @@ class Drone:
         """
         K = settings.mpc.K
         # Extract position trajectory from state trajectory
-        pos = (self.S_x @ data.x_0 + self.S_u_W_input @ data.zeta).T.reshape((K + 1, 6))[:, :3]
+        pos = (data.matrices.S_x @ data.x_0 + data.matrices.S_u_W_input @ data.zeta).T.reshape(
+            (K + 1, 6)
+        )[:, :3]
         # Get input position, velocity and acceleration from spline coefficients
-        u_pos = (self.W @ data.zeta).T.reshape((K, 3))
-        u_vel = (self.W_dot @ data.zeta).T.reshape((K, 3))
-        u_acc = (self.W_ddot @ data.zeta).T.reshape(K, 3)
-
-        return Result(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc, zeta=data.zeta)
+        u_pos = (data.matrices.W @ data.zeta).T.reshape((K, 3))
+        u_vel = (data.matrices.W_dot @ data.zeta).T.reshape((K, 3))
+        u_acc = (data.matrices.W_ddot @ data.zeta).T.reshape(K, 3)
+        data.results[data.rank] = Result(
+            pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc, zeta=data.zeta
+        )
+        return data
 
     def actual_solve(
         self, data: SolverData, settings: SolverSettings
@@ -220,16 +178,16 @@ class Drone:
         rho = settings.rho_init
 
         # Initialize optimization variables and matrices
-        Q = np.zeros_like(self.quad_cost)  # Combined quadratic terms
-        q = np.zeros(self.quad_cost.shape[0])  # Combined linear terms
+        Q = np.zeros_like(data.cost.quad_cost)  # Combined quadratic terms
+        q = np.zeros(data.cost.quad_cost.shape[0])  # Combined linear terms
         zeta = data.zeta
-        zeta = np.zeros(self.quad_cost.shape[0])  # Optimization variable
+        zeta = np.zeros(data.cost.quad_cost.shape[0])  # Optimization variable
 
-        bregman_mult = np.zeros(self.quad_cost.shape[0])  # Bregman multiplier
+        bregman_mult = np.zeros(data.cost.quad_cost.shape[0])  # Bregman multiplier
 
         # Aggregate quadratic and linear terms from all constraints
-        quad_constraint_terms = np.zeros_like(self.quad_cost)
-        linear_constraint_terms = np.zeros(self.linear_cost.shape[0])
+        quad_constraint_terms = np.zeros_like(data.cost.quad_cost)
+        linear_constraint_terms = np.zeros(data.cost.linear_cost.shape[0])
 
         for constraint in data.constraints:
             quad_constraint_terms += constraint.get_quadratic_term()
@@ -237,11 +195,11 @@ class Drone:
 
         # Iteratively solve until solution found or max iterations reached
         for i in range(settings.max_iters):
-            Q = self.quad_cost + rho * quad_constraint_terms
+            Q = data.cost.quad_cost + rho * quad_constraint_terms
 
             # Construct linear cost matrices
             linear_constraint_terms -= bregman_mult
-            q = self.linear_cost + rho * linear_constraint_terms
+            q = data.cost.linear_cost + rho * linear_constraint_terms
 
             # Solve the QP
             zeta = np.linalg.solve(Q, -q)
@@ -269,14 +227,14 @@ class Drone:
         data.zeta = zeta
         return False, i, data  # Indicate failure but still return vector
 
-    def solve(self, data: SolverData, settings: SolverSettings) -> tuple[bool, int, any]:
+    def solve(self, data: SolverData, settings: SolverSettings) -> tuple[bool, int, SolverData]:
         """Main solve function to be called by user.
 
         Contains main solving workflow (pre_solve, actual_solve, post_solve).
         Not meant to be overridden.
         """
         # Reset cost and clear carryover constraints from previous solves
-        self.reset_cost_matrices()
+        data = reset_cost_matrices(data)
         data.constraints.clear()
         # Build new constraints and add to cost matrices
         data = self.pre_solve(data, settings)
@@ -288,10 +246,12 @@ class Drone:
         # Post-process solution according to derived class implementation
         return success, iters, self.post_solve(data, settings)
 
-    def reset_cost_matrices(self) -> None:
-        """Resets cost matrices to initial values"""
-        self.quad_cost = self.initial_quad_cost.copy()
-        self.linear_cost[...] = 0
+
+def reset_cost_matrices(data: SolverData) -> SolverData:
+    """Reset cost matrices to initial values"""
+    data.cost.quad_cost = data.cost.initial_quad_cost.copy()
+    data.cost.linear_cost[...] = 0
+    return data
 
 
 @dataclass
@@ -329,6 +289,10 @@ class SolverData:
     """Solver data"""
 
     waypoints: dict[str, NDArray]
+    results: list[Result] = field(default_factory=lambda: [])
+    previous_results: list[Result] = field(default_factory=lambda: [])
+    matrices: Matrices | None = None
+    rank: int = 0
 
     current_time: float = 0.0
     obstacle_envelopes: list[np.ndarray] = None
@@ -340,6 +304,128 @@ class SolverData:
     zeta: NDArray | None = None
 
     constraints: list[Constraint] = field(default_factory=lambda: [])
+
+    @staticmethod
+    def init(waypoints: dict[str, NDArray], K: int) -> SolverData:
+        n_drones = waypoints["pos"].shape[1]
+        results = [Result.initial_result(waypoints["pos"][k, 0], K) for k in range(n_drones)]
+        return SolverData(waypoints=waypoints, results=[None] * n_drones, previous_results=results)
+
+    def init_matrices(self, dynamics: Dynamics, K: int, N: int, freq: int):
+        self.matrices = Matrices.from_dynamics(dynamics, K, N, freq)
+
+    def init_cost(self, weights: Weights):
+        assert self.matrices is not None, "Matrices must be initialized before cost"
+        self.cost = CostData.init(weights, self.matrices)
+
+
+@dataclass
+class Matrices:
+    """Matrices for drone trajectory optimization"""
+
+    W: np.ndarray
+    W_dot: np.ndarray
+    W_ddot: np.ndarray
+    W_input: np.ndarray
+    S_x: np.ndarray
+    S_u: np.ndarray
+    S_u_W_input: np.ndarray
+    S_x_prime: np.ndarray
+    S_u_prime: np.ndarray
+    M_p_S_u_W_input: np.ndarray
+    M_v_S_u_W_input: np.ndarray
+    M_a_S_u_prime_W_input: np.ndarray
+    M_p_S_x: np.ndarray
+    M_v_S_x: np.ndarray
+    M_a_S_x_prime: np.ndarray
+    G_u: np.ndarray
+    G_p: np.ndarray
+
+    @staticmethod
+    def from_dynamics(dynamics: Dynamics, K: int, N: int, freq: int):
+        W, W_dot, W_ddot = bernstein_matrices(K, N, freq)
+        W, W_dot, W_ddot = np.asarray(W), np.asarray(W_dot), np.asarray(W_ddot)
+        W_input = np.asarray(bernstein_input(W, W_dot))
+
+        S_x, S_u, S_x_prime, S_u_prime = full_horizon_dynamics(
+            dynamics.A, dynamics.B, dynamics.A_prime, dynamics.B_prime, K
+        )
+        S_x = np.asarray(S_x)
+        S_u, S_x_prime, S_u_prime = np.asarray(S_u), np.asarray(S_x_prime), np.asarray(S_u_prime)
+        # Precompute matrices that don't change at solve time
+        S_u_W_input = S_u @ W_input
+
+        # Create an index of 0:3, 6:9, 12:15, ...
+        p_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., :3].flatten()
+        # Create an index of 3:6, 9:12, 15:18, ...
+        v_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
+        a_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
+        M_p_S_u_W_input = S_u_W_input[p_idx]
+        M_v_S_u_W_input = S_u_W_input[v_idx]
+        M_a_S_u_prime_W_input = S_u_prime[a_idx] @ W_input
+
+        M_p_S_x = S_x[p_idx]
+        M_v_S_x = S_x[v_idx]
+        M_a_S_x_prime = S_x_prime[a_idx]
+
+        # Precompute constraint matrices
+        G_u = np.concat((W[:3], W_dot[:3], W_ddot[:3]))
+        G_p = np.concat((M_p_S_u_W_input, -M_p_S_u_W_input))
+
+        return Matrices(
+            W=W,
+            W_dot=W_dot,
+            W_ddot=W_ddot,
+            W_input=W_input,
+            S_x=S_x,
+            S_u=S_u,
+            S_u_W_input=S_u_W_input,
+            S_x_prime=S_x_prime,
+            S_u_prime=S_u_prime,
+            M_p_S_u_W_input=M_p_S_u_W_input,
+            M_v_S_u_W_input=M_v_S_u_W_input,
+            M_a_S_u_prime_W_input=M_a_S_u_prime_W_input,
+            M_p_S_x=M_p_S_x,
+            M_v_S_x=M_v_S_x,
+            M_a_S_x_prime=M_a_S_x_prime,
+            G_u=G_u,
+            G_p=G_p,
+        )
+
+
+@dataclass
+class CostData:
+    """Cost data"""
+
+    quad_cost: np.ndarray
+    initial_quad_cost: np.ndarray
+    linear_cost: np.ndarray
+    linear_cost_smoothness_const_term: np.ndarray
+
+    @staticmethod
+    def init(weights: Weights, matrices: Matrices):
+        K, N = matrices.W.shape[0] // 3, matrices.W.shape[1] // 3 - 1
+        quad_cost = 2 * weights.input_smoothness * (matrices.W_ddot.T @ matrices.W_ddot)
+        a_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
+        quad_cost += (
+            2
+            * weights.smoothness
+            * matrices.W_input.T
+            @ matrices.S_u_prime[a_idx].T
+            @ matrices.S_u_prime[a_idx]
+            @ matrices.W_input
+        )
+        quad_cost += 2 * weights.input_continuity * matrices.G_u.T @ matrices.G_u
+        linear_cost = np.zeros(3 * (N + 1))
+        linear_cost_smoothness_const_term = (
+            2 * weights.smoothness * matrices.M_a_S_u_prime_W_input.T @ matrices.M_a_S_x_prime
+        )
+        return CostData(
+            quad_cost=quad_cost,
+            initial_quad_cost=quad_cost.copy(),
+            linear_cost=linear_cost,
+            linear_cost_smoothness_const_term=linear_cost_smoothness_const_term,
+        )
 
 
 @dataclass

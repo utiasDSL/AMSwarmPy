@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -173,7 +174,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     with open(Path(__file__).resolve().parents[1] / "params/settings.yaml") as f:
         settings = yaml.safe_load(f)
 
-    num_drones = sim.n_drones
+    n_drones = sim.n_drones
 
     # Setup simulation parameters
     mpc_freq = settings["MPCSettings"]["freq"]
@@ -181,12 +182,9 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     n_steps = int(duration_sec * mpc_freq)
 
     # Initialize results storage
-    simulated_pos = np.zeros((n_steps, num_drones, 3))
+    simulated_pos = np.zeros((n_steps, n_drones, 3))
 
-    drone_results = [
-        amswarmpy.Result.initial_result(waypoints["pos"][k, 0], settings["MPCSettings"]["K"])
-        for k in range(num_drones)
-    ]
+    solver_data = amswarmpy.SolverData.init(waypoints=waypoints, K=settings["MPCSettings"]["K"])
 
     # Initialize drones and swarm
     constraint_settings = amswarmpy.ConstraintSettings(
@@ -207,14 +205,14 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     solver_settings.constraints.acc = False
     solver_settings.constraints.input_continuity = True
     dynamics = amswarmpy.Dynamics(**settings["Dynamics"])
-    drones = [
-        amswarmpy.Drone(settings=solver_settings, dynamics=dynamics) for i in range(num_drones)
-    ]
+    solver_data.init_matrices(dynamics, mpc_settings.K, mpc_settings.N, mpc_settings.freq)
+    drones = [amswarmpy.Drone() for _ in range(n_drones)]
+    solver_data.init_cost(weights)
 
     # Set initial states
-    initial_states = np.concat((waypoints["pos"][0], np.zeros((num_drones, 3))), axis=-1)
-    solve_success, iters, drone_results = amswarmpy.solve(
-        drones, 0, initial_states, waypoints, drone_results, solver_settings
+    initial_states = np.concat((waypoints["pos"][0], np.zeros((n_drones, 3))), axis=-1)
+    solve_success, iters, solver_data = amswarmpy.solve(
+        drones, 0, initial_states, waypoints, solver_data, solver_settings
     )
     if not all(solve_success):
         print("Warning: Solve failed")
@@ -229,24 +227,27 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     for step in range(n_steps):
         current_time = step / mpc_freq
 
-        initial_states = np.concat((current_positions, np.zeros((num_drones, 3))), axis=-1)
-        solve_success, iters, drone_results = amswarmpy.solve(
-            drones, current_time, initial_states, waypoints, drone_results, solver_settings
+        initial_states = np.concat((current_positions, np.zeros((n_drones, 3))), axis=-1)
+        solve_success, iters, solver_data = amswarmpy.solve(
+            drones, current_time, initial_states, waypoints, solver_data, solver_settings
         )
         if not all(solve_success):
             print("Warning: Solve failed")
 
-        for result in drone_results:
+        for i in range(n_drones):
+            solver_data.results[i].advance_for_next_solve_step()
+            solver_data.previous_results[i] = deepcopy(solver_data.results[i])
+        for result in solver_data.results:
             result.advance_for_next_solve_step()
-        control = np.stack([r.pos[1] for r in drone_results], axis=0)
+        control = np.stack([r.pos[1] for r in solver_data.results], axis=0)
         control = np.concat([control, np.zeros((control.shape[0], 10))], axis=-1)
         control = control[None, ...]
 
         sim.state_control(control)
         sim.step(sim.freq // mpc_freq)
         if render:
-            render_solutions(sim, [r.pos for r in drone_results])
-            for i in range(num_drones):
+            render_solutions(sim, [r.pos for r in solver_data.results])
+            for i in range(n_drones):
                 draw_points(sim, waypoints["pos"][:, i, :], rgba=rgbas[i], size=0.02)
             sim.render()
 
@@ -299,11 +300,11 @@ def main(render: bool = False):
     sim = Sim(n_drones=5, freq=400, state_freq=80, attitude_freq=400, control="state")
     n_points = 7
     waypoints = generate_waypoints(sim.n_drones, n_points=n_points)
-    results_amswarm = simulate_amswarm(sim, waypoints, render=render)
+    # results_amswarm = simulate_amswarm(sim, waypoints, render=render)
 
     results_amswarm = None
     t1 = time.perf_counter()
-    results_amswarm = simulate_amswarm(sim, waypoints, render=render)
+    # results_amswarm = simulate_amswarm(sim, waypoints, render=render)
     t2 = time.perf_counter()
     print(f"AMSwarm (cpp) time: {t2 - t1:.2f} seconds")
     tstart = time.perf_counter()

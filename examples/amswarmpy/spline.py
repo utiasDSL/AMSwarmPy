@@ -67,11 +67,11 @@ def _bernstein_ddcoeff(k: Array, n: Array, K: int, N: int, freq: int) -> Array:
 
 
 def _expand_coeff(W: Array) -> Array:
-    K, N = W.shape[0], W.shape[1] - 1
-    expanded_W = jp.empty((3 * K, 3 * (N + 1)))
-    k_idx = jp.repeat(3 * jp.arange(K)[:, None], N + 1, axis=1)
-    n_idx = jp.tile(jp.arange(N + 1), (K, 1))
+    K, N = W.shape[0], W.shape[1]
+    expanded_W = jp.empty((3 * K, 3 * N))
+    k_idx = jp.repeat(3 * jp.arange(K)[:, None], N, axis=1)
+    n_idx = jp.tile(jp.arange(N), (K, 1))
     expanded_W = expanded_W.at[k_idx, n_idx].set(W)
-    expanded_W = expanded_W.at[k_idx + 1, n_idx + (N + 1)].set(W)
-    expanded_W = expanded_W.at[k_idx + 2, n_idx + 2 * (N + 1)].set(W)
+    expanded_W = expanded_W.at[k_idx + 1, n_idx + N].set(W)
+    expanded_W = expanded_W.at[k_idx + 2, n_idx + 2 * N].set(W)
     return expanded_W

@@ -186,6 +186,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
 
     # Initialize data and settings
     weights = amswarmpy.Weights(**settings["Weights"])
+    settings["Limits"]["collision"] = np.asarray(settings["Limits"]["collision"])
     limits = amswarmpy.Limits(**settings["Limits"])
     mpc_settings = amswarmpy.MPCSettings(**settings["MPCSettings"])
     solver_settings = amswarmpy.SolverSettings(
@@ -212,7 +213,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     if not all(success):
         print("Warning: Solve failed")
 
-    pos, vel = waypoints["pos"][0], np.zeros((n_drones, 3))
+    pos, vel = waypoints["pos"][0], waypoints["vel"][0]
 
     sim.reset()
     # Set initial position states to first waypoint for each drone
@@ -226,17 +227,16 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         if not all(success):
             print("Warning: Solve failed")
 
-        for i in range(n_drones):
-            solver_data.trajectory[i].step()
-            solver_data.previous_trajectory[i] = deepcopy(solver_data.trajectory[i])
-        control = np.stack([r.pos[1] for r in solver_data.trajectory], axis=0)
+        solver_data.trajectory.step()
+        solver_data.previous_trajectory = deepcopy(solver_data.trajectory)
+        control = solver_data.trajectory.pos[:, 1]
         control = np.concat([control, np.zeros((control.shape[0], 10))], axis=-1)
         control = control[None, ...]
 
         sim.state_control(control)
         sim.step(sim.freq // mpc_freq)
         if render:
-            render_solutions(sim, [traj.pos for traj in solver_data.trajectory])
+            render_solutions(sim, solver_data.trajectory.pos)
             for i in range(n_drones):
                 draw_points(sim, waypoints["pos"][:, i, :], rgba=rgbas[i], size=0.02)
             sim.render()

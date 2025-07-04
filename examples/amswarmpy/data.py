@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import partial
 
@@ -7,6 +8,7 @@ import jax
 import jax.numpy as jp
 import numpy as np
 from einops import rearrange
+from flax.struct import dataclass as flax_dataclass
 from jax import Array
 from numpy.typing import NDArray
 
@@ -15,48 +17,21 @@ from .spline import bernstein_input, bernstein_matrices
 
 
 @dataclass
-class Trajectory:
-    """Swarm trajectories"""
-
-    pos: np.ndarray  # K+1 x 3 matrix, each row is position at a timestep
-    u_pos: np.ndarray  # K x 3 matrix
-    u_vel: np.ndarray  # K x 3 matrix
-    u_acc: np.ndarray  # K x 3 matrix
-
-    @staticmethod
-    def init(pos: NDArray, K: int) -> Trajectory:
-        """Generate initial trajectory"""
-        u_pos = np.tile(pos, (K, 1))
-        pos = np.tile(pos, (K + 1, 1))
-        return Trajectory(pos=pos, u_pos=u_pos, u_vel=np.zeros((K, 3)), u_acc=np.zeros((K, 3)))
-
-    def step(self):
-        """Advance trajectories by one step for next solve iteration"""
-        # Extrapolate last position by adding the difference between last two positions
-        extrapolated_pos = 2 * self.pos[-1] - self.pos[-2]
-        self.pos[:-1] = self.pos[1:]
-        self.pos[-1] = extrapolated_pos
-        # Advance input trajectories - only shift values since we only check first row
-        self.u_pos[:-1] = self.u_pos[1:]
-        self.u_vel[:-1] = self.u_vel[1:]
-        self.u_acc[:-1] = self.u_acc[1:]
-
-
-@dataclass
 class SolverData:
     """Solver data"""
 
     waypoints: dict[str, NDArray]
 
-    zeta: NDArray
-    trajectory: list[Trajectory] = field(default_factory=lambda: [])
-    previous_trajectory: list[Trajectory] = field(default_factory=lambda: [])
+    zeta: NDArray  # n_drones x 3 * (N + 1)
+    trajectory: Trajectory
+    previous_trajectory: Trajectory
 
     matrices: Matrices | None = None
     current_time: float = 0.0
+    x_0: NDArray | None = None  # n_drones x 6 (pos, vel)
+    cost: CostData | None = None
 
-    obstacle_positions: list[np.ndarray] = None
-    x_0: np.ndarray = field(default_factory=lambda: np.zeros(6))  # Initial state [pos, vel]
+    obstacle_positions: list[NDArray] | None = None
 
     constraints: list[Constraint] = field(default_factory=lambda: [])
     rank: int = 0  # TODO: Remove
@@ -64,13 +39,13 @@ class SolverData:
     @staticmethod
     def init(waypoints: dict[str, NDArray], K: int, N: int) -> SolverData:
         n_drones = waypoints["pos"].shape[1]
-        trajectory = [Trajectory.init(waypoints["pos"][0, k], K) for k in range(n_drones)]
+        trajectory = Trajectory.init(waypoints["pos"][0, :], K, n_drones)
         # Init optimization variable
         zeta = np.zeros((n_drones, 3 * (N + 1)))
         return SolverData(
             waypoints=waypoints,
             zeta=zeta,
-            trajectory=[None] * n_drones,
+            trajectory=deepcopy(trajectory),
             previous_trajectory=trajectory,
         )
 
@@ -83,6 +58,39 @@ class SolverData:
 
 
 @dataclass
+class Trajectory:
+    """Swarm trajectories"""
+
+    pos: np.ndarray  # n_drones x K+1 x 3 matrix, each row is position at a timestep
+    u_pos: np.ndarray  # n_drones x K x 3 matrix
+    u_vel: np.ndarray  # n_drones x K x 3 matrix
+    u_acc: np.ndarray  # n_drones x K x 3 matrix
+
+    @staticmethod
+    def init(pos: NDArray, K: int, n_drones: int) -> Trajectory:
+        """Generate initial trajectory"""
+        assert pos.shape == (n_drones, 3), f"{pos.shape} != {(n_drones, 3)}"
+        u_pos = np.tile(pos[:, None, :], (1, K, 1))
+        assert u_pos.shape == (n_drones, K, 3), f"{u_pos.shape} != {(n_drones, K, 3)}"
+        pos = np.tile(pos[:, None, :], (1, K + 1, 1))
+        assert pos.shape == (n_drones, K + 1, 3), f"{pos.shape} != {(n_drones, K + 1, 3)}"
+        return Trajectory(
+            pos=pos, u_pos=u_pos, u_vel=np.zeros((n_drones, K, 3)), u_acc=np.zeros((n_drones, K, 3))
+        )
+
+    def step(self):
+        """Advance trajectories by one step for next solve iteration"""
+        # Extrapolate last position by adding the difference between last two positions
+        extrapolated_pos = 2 * self.pos[:, -1] - self.pos[:, -2]
+        self.pos[:, :-1] = self.pos[:, 1:]
+        self.pos[:, -1] = extrapolated_pos
+        # Advance input trajectories - only shift values since we only check first row
+        self.u_pos[:, :-1] = self.u_pos[:, 1:]
+        self.u_vel[:, :-1] = self.u_vel[:, 1:]
+        self.u_acc[:, :-1] = self.u_acc[:, 1:]
+
+
+@flax_dataclass
 class Matrices:
     """Matrices for drone trajectory optimization"""
 
@@ -250,9 +258,6 @@ class Limits:
     vel_max: float = 1.73  # Maximum velocity
     acc_max: float = 0.75 * 9.81  # Maximum acceleration (0.75g)
     collision: NDArray | None = None
-
-    def __post_init__(self):
-        self.collision = np.asarray(self.collision)
 
 
 @partial(jax.jit, static_argnames=("K"))

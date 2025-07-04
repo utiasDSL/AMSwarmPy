@@ -3,12 +3,41 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from .constraint import (
-    EqualityConstraint,
-    InequalityConstraint,
-    PolarInequalityConstraint,
-)
-from .data import SolverData, SolverSettings, Trajectory
+from .constraint import EqualityConstraint, InequalityConstraint, PolarInequalityConstraint
+from .data import SolverData, SolverSettings
+
+
+def solve_swarm(
+    states: NDArray, t: float, data: SolverData, settings: SolverSettings
+) -> tuple[list[bool], list[int], SolverData]:
+    n_drones = len(states)
+    avoidance_map = {i: [j for j in range(n_drones) if j != i] for i in range(n_drones)}
+    pos = data.previous_trajectory.pos
+    col = 1.0 / settings.limits.collision
+    intersect = np.any(
+        np.linalg.norm((pos[None, ...] - pos[:, None, ...]) * col, axis=-1) <= 1.0, axis=-1
+    )
+
+    is_success = np.zeros(n_drones, dtype=bool)
+    iters = np.zeros(n_drones)
+
+    # Solve for each drone
+    data.x_0 = states
+    data.current_time = t
+    for i in range(n_drones):
+        data.rank = i
+        # Check for potential collisions with drones this drone needs to avoid
+        obstacle_positions = []
+        for avoid_drone in avoidance_map[i]:
+            if intersect[i, avoid_drone]:
+                obstacle_positions.append(data.previous_trajectory.pos[avoid_drone].flatten())
+        data.obstacle_positions = obstacle_positions
+
+        success, num_iters, data = solve_drone(data, settings)  # Solve for this drone
+        is_success[i] = success
+        iters[i] = num_iters
+
+    return is_success, iters, data
 
 
 def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
@@ -61,9 +90,9 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
         data.constraints.append(EqualityConstraint(G_wa, h_wa, settings.mpc.waypoints_acc_tol))
 
     # Input continuity cost and/or equality constraint
-    u_0 = data.previous_trajectory[data.rank].u_pos[0]
-    u_dot_0 = data.previous_trajectory[data.rank].u_vel[0]
-    u_ddot_0 = data.previous_trajectory[data.rank].u_acc[0]
+    u_0 = data.previous_trajectory.u_pos[data.rank, 0]
+    u_dot_0 = data.previous_trajectory.u_vel[data.rank, 0]
+    u_ddot_0 = data.previous_trajectory.u_acc[data.rank, 0]
     h_u = np.concatenate([u_0, u_dot_0, u_ddot_0])
     data.cost.linear += -2 * settings.weights.input_continuity * data.matrices.G_u.T @ h_u
     if settings.constraints.input_continuity:
@@ -129,10 +158,10 @@ def spline2states(data: SolverData, settings: SolverSettings) -> SolverData:
     x_0 = data.x_0[data.rank]
     pos = (data.matrices.S_x @ x_0 + data.matrices.S_u_W_input @ zeta).T.reshape((K + 1, 6))[:, :3]
     # Get input position, velocity and acceleration from spline coefficients
-    u_pos = (data.matrices.W @ zeta).T.reshape((K, 3))
-    u_vel = (data.matrices.W_dot @ zeta).T.reshape((K, 3))
-    u_acc = (data.matrices.W_ddot @ zeta).T.reshape(K, 3)
-    data.trajectory[data.rank] = Trajectory(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc)
+    data.trajectory.pos[data.rank] = pos
+    data.trajectory.u_pos[data.rank] = (data.matrices.W @ zeta).T.reshape((K, 3))
+    data.trajectory.u_vel[data.rank] = (data.matrices.W_dot @ zeta).T.reshape((K, 3))
+    data.trajectory.u_acc[data.rank] = (data.matrices.W_ddot @ zeta).T.reshape(K, 3)
     return data
 
 

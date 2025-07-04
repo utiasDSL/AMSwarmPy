@@ -19,8 +19,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     # Extract waypoints in current horizon. Each row is a waypoint of form:
     # [k, x, y, z, vx, vy, vz, ax, ay, az]. k is discrete STEP in current horizon
     K, freq = settings.mpc.K, settings.mpc.freq
-    if data.zeta is None:
-        data.zeta = np.zeros(data.cost.quad.shape[0])  # Init optimization variable
+    assert data.zeta is not None, "Zeta must be initialized before adding constraints"
 
     mask, steps = filter_horizon(data.waypoints["time"][:, data.rank], data.current_time, K, freq)
     # Separate and reshape waypoints into position, velocity, and acceleration vectors
@@ -126,15 +125,14 @@ def spline2states(data: SolverData, settings: SolverSettings) -> SolverData:
     """Extract position, velocity, and acceleration trajectories from solution coefficients."""
     K = settings.mpc.K
     # Extract position trajectory from state trajectory
+    zeta = data.zeta[data.rank]
     x_0 = data.x_0[data.rank]
-    pos = (data.matrices.S_x @ x_0 + data.matrices.S_u_W_input @ data.zeta).T.reshape((K + 1, 6))[
-        :, :3
-    ]
+    pos = (data.matrices.S_x @ x_0 + data.matrices.S_u_W_input @ zeta).T.reshape((K + 1, 6))[:, :3]
     # Get input position, velocity and acceleration from spline coefficients
-    u_pos = (data.matrices.W @ data.zeta).T.reshape((K, 3))
-    u_vel = (data.matrices.W_dot @ data.zeta).T.reshape((K, 3))
-    u_acc = (data.matrices.W_ddot @ data.zeta).T.reshape(K, 3)
-    data.results[data.rank] = Result(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc, zeta=data.zeta)
+    u_pos = (data.matrices.W @ zeta).T.reshape((K, 3))
+    u_vel = (data.matrices.W_dot @ zeta).T.reshape((K, 3))
+    u_acc = (data.matrices.W_ddot @ zeta).T.reshape(K, 3)
+    data.results[data.rank] = Result(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc)
     return data
 
 
@@ -149,8 +147,7 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
     # Initialize optimization variables and matrices
     Q = np.zeros_like(data.cost.quad)  # Combined quadratic terms
     q = np.zeros(data.cost.quad.shape[0])  # Combined linear terms
-    zeta = data.zeta
-    zeta = np.zeros(data.cost.quad.shape[0])  # Optimization variable
+    zeta = data.zeta[data.rank]  # Previously was zero initialized, now uses previous solution
 
     bregman_mult = np.zeros(data.cost.quad.shape[0])  # Bregman multiplier
 
@@ -178,7 +175,7 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
             c.update(zeta)
 
         if all(c.is_satisfied(zeta) for c in data.constraints):
-            data.zeta = zeta
+            data.zeta[data.rank] = zeta
             return True, i, data  # Exit loop, indicate success
 
         # Recalculate linear term for Bregman multiplier
@@ -193,7 +190,7 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
         rho *= settings.rho_init
         rho = min(rho, settings.rho_max)
 
-    data.zeta = zeta
+    data.zeta[data.rank] = zeta
     return False, i, data  # Indicate failure but still return vector
 
 

@@ -22,7 +22,6 @@ class Result:
     u_pos: np.ndarray  # K x 3 matrix
     u_vel: np.ndarray  # K x 3 matrix
     u_acc: np.ndarray  # K x 3 matrix
-    zeta: np.ndarray | None = None  # Spline coefficients for input parameterization
 
     @staticmethod
     def initial_result(initial_pos: NDArray, K: int) -> Result:
@@ -50,11 +49,11 @@ class SolverData:
 
     waypoints: dict[str, NDArray]
 
+    zeta: NDArray
     results: list[Result] = field(default_factory=lambda: [])
     previous_results: list[Result] = field(default_factory=lambda: [])
 
     matrices: Matrices | None = None
-    zeta: NDArray | None = None
     current_time: float = 0.0
 
     obstacle_positions: list[np.ndarray] = None
@@ -64,10 +63,17 @@ class SolverData:
     rank: int = 0  # TODO: Remove
 
     @staticmethod
-    def init(waypoints: dict[str, NDArray], K: int) -> SolverData:
+    def init(waypoints: dict[str, NDArray], K: int, N: int) -> SolverData:
         n_drones = waypoints["pos"].shape[1]
         results = [Result.initial_result(waypoints["pos"][k, 0], K) for k in range(n_drones)]
-        return SolverData(waypoints=waypoints, results=[None] * n_drones, previous_results=results)
+        # Init optimization variable
+        zeta = np.zeros((n_drones, 3 * (N + 1)))
+        return SolverData(
+            waypoints=waypoints,
+            zeta=zeta,
+            results=[None] * n_drones,
+            previous_results=results,
+        )
 
     def init_matrices(self, A, B, A_prime, B_prime, K: int, N: int, freq: int):
         self.matrices = Matrices.from_dynamics(A, B, A_prime, B_prime, K, N, freq)

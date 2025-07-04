@@ -181,8 +181,8 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
 
     trajectories = np.zeros((n_steps, n_drones, 3))  # Initialize trajectories storage
 
-    K = settings["MPCSettings"]["K"]
-    solver_data = amswarmpy.SolverData.init(waypoints=waypoints, K=K)
+    K, N = settings["MPCSettings"]["K"], settings["MPCSettings"]["N"]
+    solver_data = amswarmpy.SolverData.init(waypoints=waypoints, K=K, N=N)
 
     # Initialize data and settings
     weights = amswarmpy.Weights(**settings["Weights"])

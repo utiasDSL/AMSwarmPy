@@ -62,7 +62,10 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
         data.constraints.append(EqualityConstraint(G_wa, h_wa, settings.mpc.waypoints_acc_tol))
 
     # Input continuity cost and/or equality constraint
-    h_u = np.concatenate([data.u_0, data.u_dot_0, data.u_ddot_0])
+    u_0 = data.previous_results[data.rank].u_pos[0]
+    u_dot_0 = data.previous_results[data.rank].u_vel[0]
+    u_ddot_0 = data.previous_results[data.rank].u_acc[0]
+    h_u = np.concatenate([u_0, u_dot_0, u_ddot_0])
     data.cost.linear += -2 * settings.weights.input_continuity * data.matrices.G_u.T @ h_u
     if settings.constraints.input_continuity:
         data.constraints.append(
@@ -102,8 +105,8 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     )
 
     # Collision constraints
-    for pos, envelope in zip(data.obstacle_positions, data.obstacle_envelopes, strict=True):
-        envelope = np.tile(envelope, K + 1)
+    for pos in data.obstacle_positions:
+        envelope = np.tile(1 / settings.limits.collision, K + 1)
         G_c = envelope[:, None] * data.matrices.M_p_S_u_W_input
         c_c = envelope * (data.matrices.M_p_S_x @ x_0 - pos)
         data.constraints.append(

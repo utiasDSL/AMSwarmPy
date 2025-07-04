@@ -49,21 +49,19 @@ class SolverData:
     """Solver data"""
 
     waypoints: dict[str, NDArray]
+
     results: list[Result] = field(default_factory=lambda: [])
     previous_results: list[Result] = field(default_factory=lambda: [])
-    matrices: Matrices | None = None
-    rank: int = 0
 
+    matrices: Matrices | None = None
+    zeta: NDArray | None = None
     current_time: float = 0.0
-    obstacle_envelopes: list[np.ndarray] = None
+
     obstacle_positions: list[np.ndarray] = None
     x_0: np.ndarray = field(default_factory=lambda: np.zeros(6))  # Initial state [pos, vel]
-    u_0: np.ndarray = field(default_factory=lambda: np.zeros(3))  # Initial input pos reference
-    u_dot_0: np.ndarray = field(default_factory=lambda: np.zeros(3))  # Initial input vel reference
-    u_ddot_0: np.ndarray = field(default_factory=lambda: np.zeros(3))  # Initial input acc reference
-    zeta: NDArray | None = None
 
     constraints: list[Constraint] = field(default_factory=lambda: [])
+    rank: int = 0  # TODO: Remove
 
     @staticmethod
     def init(waypoints: dict[str, NDArray], K: int) -> SolverData:

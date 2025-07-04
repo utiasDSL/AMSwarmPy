@@ -13,7 +13,6 @@ def solve_swarm(
     states: NDArray, t: float, data: SolverData, settings: SolverSettings
 ) -> tuple[list[bool], list[int], SolverData]:
     n_drones = len(states)
-    envelope = 1.0 / settings.limits.collision
     # Alternatively, use assign_tuples(list(combinations(range(n_drones), 2)))
     avoidance_map = {i: [j for j in range(n_drones) if j != i] for i in range(n_drones)}
 
@@ -26,24 +25,20 @@ def solve_swarm(
     data.current_time = t
     for i in range(n_drones):
         obstacle_positions = []
-        obstacle_envelopes = []
 
         # Check for potential collisions with drones this drone needs to avoid
         for avoid_drone in avoidance_map[i]:
             # Time taken: 5.00e-05 seconds
             intersect = check_intersection(
-                data.previous_results[i].pos, data.previous_results[avoid_drone].pos, envelope
+                data.previous_results[i].pos,
+                data.previous_results[avoid_drone].pos,
+                1.0 / settings.limits.collision,
             )
             if intersect:
                 obstacle_positions.append(data.previous_results[avoid_drone].pos.flatten())
-                obstacle_envelopes.append(envelope)
 
         data.rank = i
         data.obstacle_positions = obstacle_positions
-        data.obstacle_envelopes = obstacle_envelopes
-        data.u_0 = data.previous_results[i].u_pos[0]
-        data.u_dot_0 = data.previous_results[i].u_vel[0]
-        data.u_ddot_0 = data.previous_results[i].u_acc[0]
 
         # Solve for this drone
         success, num_iters, data = solve_drone(data, settings)

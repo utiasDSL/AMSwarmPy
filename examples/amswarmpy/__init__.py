@@ -1,8 +1,6 @@
 from .core import solve
-from .drone import (
+from .data import (
     ConstraintSettings,
-    Drone,
-    Dynamics,
     Limits,
     MPCSettings,
     Result,
@@ -10,11 +8,10 @@ from .drone import (
     SolverSettings,
     Weights,
 )
+from .drone import solve_drone
 
 __all__ = [
     "ConstraintSettings",
-    "Drone",
-    "Dynamics",
     "Limits",
     "MPCSettings",
     "Result",
@@ -22,4 +19,5 @@ __all__ = [
     "SolverSettings",
     "Weights",
     "solve",
+    "solve_drone",
 ]

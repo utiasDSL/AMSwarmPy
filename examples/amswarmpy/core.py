@@ -1,43 +1,24 @@
 from __future__ import annotations
 
+import jax
+import jax.numpy as jp
 import numpy as np
+from jax import Array
 from numpy.typing import NDArray
 
-from .drone import Drone, SolverData, SolverSettings
+from .drone import SolverData, SolverSettings, solve_drone
 
 
 def solve(
-    drones: list[Drone],
     current_time: float,
-    initial_states: list[np.ndarray],
+    states: NDArray,
     waypoints: dict[str, NDArray],
     data: SolverData,
     settings: SolverSettings,
 ) -> tuple[list[bool], list[int], SolverData]:
-    """Solves the navigation and collision avoidance problem for the entire swarm.
-
-    Takes the current time, initial states of each drone, results from previous
-    computations, and constraint configurations to compute the next trajectories for each
-    drone. The past results are used for drones to predict where other drones will be, so they
-    can avoid them. Also, the past results are used for the input continuity constraint.
-
-    Args:
-        current_time: The current time
-        initial_states: List of initial states for each drone. Each initial state consists of
-            [x, y, z, vx, vy, vz]
-        previous_results: List of results from previous computation for each drone. If no previous
-            results, can initialize with Result.initial_result(...)
-        settings: Solver settings
-
-    Returns:
-        Tuple containing:
-        - List of success flags for each drone
-        - List of iteration counts
-        - List of results for the current computation
-    """
     # Validate input sizes
-    n_drones = len(drones)
-    if len(initial_states) != n_drones or len(data.previous_results) != n_drones:
+    n_drones = len(states)
+    if len(data.previous_results) != n_drones:
         raise ValueError("Input lists must all have same length as number of drones in swarm")
     assert isinstance(settings, SolverSettings), f"Unexpected type: {type(settings)}"
 
@@ -69,35 +50,31 @@ def solve(
         data.current_time = current_time
         data.obstacle_positions = obstacle_positions
         data.obstacle_envelopes = obstacle_envelopes
-        data.x_0 = initial_states[i]
+        data.x_0 = states[i]
         data.u_0 = data.previous_results[i].u_pos[0]
         data.u_dot_0 = data.previous_results[i].u_vel[0]
         data.u_ddot_0 = data.previous_results[i].u_acc[0]
         data.waypoints = {k: v[:, i] for k, v in waypoints.items()}
 
         # Solve for this drone
-        success, num_iters, data = drones[i].solve(data, settings)
+        success, num_iters, data = solve_drone(data, settings)
         is_success[i] = success
         iters[i] = num_iters
 
     return is_success, iters, data
 
 
-def check_intersection(traj1: np.ndarray, traj2: np.ndarray, envelope: np.ndarray) -> bool:
+@jax.jit
+def check_intersection(traj_a: Array, traj_b: Array, envelope: Array) -> Array:
     """Check if two trajectories intersect given their positions and a collision envelope matrix.
-
-    Args:
-        traj1: Position trajectory of first drone
-        traj2: Position trajectory of second drone
-        envelope: Collision envelope matrix
 
     Returns:
         True if trajectories intersect, False otherwise
     """
-    assert traj1.shape == traj2.shape
-    assert traj1.shape[1] == 3, f"Shape {traj1.shape} != (N, 3)"
+    assert traj_a.shape == traj_b.shape
+    assert traj_a.shape[1] == 3, f"Shape {traj_a.shape} != (N, 3)"
     assert envelope.shape == (3,)
-    return np.any(np.linalg.norm((traj1 - traj2) * envelope, axis=-1) <= 1.0)
+    return jp.any(jp.linalg.norm((traj_a - traj_b) * envelope, axis=-1) <= 1.0)
 
 
 def assign_tuples(pairs: list[tuple[int, int]]) -> dict[int, list[int]]:

@@ -15,8 +15,8 @@ from .spline import bernstein_input, bernstein_matrices
 
 
 @dataclass
-class Result:
-    """Results from drone trajectory optimization"""
+class Trajectory:
+    """Swarm trajectories"""
 
     pos: np.ndarray  # K+1 x 3 matrix, each row is position at a timestep
     u_pos: np.ndarray  # K x 3 matrix
@@ -24,14 +24,13 @@ class Result:
     u_acc: np.ndarray  # K x 3 matrix
 
     @staticmethod
-    def initial_result(initial_pos: NDArray, K: int) -> Result:
-        """Generate initial Result with stationary trajectories at initial position"""
-        # Generate position trajectory by replicating initial position
-        pos = np.tile(initial_pos, (K + 1, 1))
-        u_pos = np.tile(initial_pos, (K, 1))
-        return Result(pos=pos, u_pos=u_pos, u_vel=np.zeros((K, 3)), u_acc=np.zeros((K, 3)))
+    def init(pos: NDArray, K: int) -> Trajectory:
+        """Generate initial trajectory"""
+        u_pos = np.tile(pos, (K, 1))
+        pos = np.tile(pos, (K + 1, 1))
+        return Trajectory(pos=pos, u_pos=u_pos, u_vel=np.zeros((K, 3)), u_acc=np.zeros((K, 3)))
 
-    def advance_for_next_solve_step(self):
+    def step(self):
         """Advance trajectories by one step for next solve iteration"""
         # Extrapolate last position by adding the difference between last two positions
         extrapolated_pos = 2 * self.pos[-1] - self.pos[-2]
@@ -50,8 +49,8 @@ class SolverData:
     waypoints: dict[str, NDArray]
 
     zeta: NDArray
-    results: list[Result] = field(default_factory=lambda: [])
-    previous_results: list[Result] = field(default_factory=lambda: [])
+    trajectory: list[Trajectory] = field(default_factory=lambda: [])
+    previous_trajectory: list[Trajectory] = field(default_factory=lambda: [])
 
     matrices: Matrices | None = None
     current_time: float = 0.0
@@ -65,14 +64,14 @@ class SolverData:
     @staticmethod
     def init(waypoints: dict[str, NDArray], K: int, N: int) -> SolverData:
         n_drones = waypoints["pos"].shape[1]
-        results = [Result.initial_result(waypoints["pos"][k, 0], K) for k in range(n_drones)]
+        trajectory = [Trajectory.init(waypoints["pos"][k, 0], K) for k in range(n_drones)]
         # Init optimization variable
         zeta = np.zeros((n_drones, 3 * (N + 1)))
         return SolverData(
             waypoints=waypoints,
             zeta=zeta,
-            results=[None] * n_drones,
-            previous_results=results,
+            trajectory=[None] * n_drones,
+            previous_trajectory=trajectory,
         )
 
     def init_matrices(self, A, B, A_prime, B_prime, K: int, N: int, freq: int):

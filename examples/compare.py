@@ -227,16 +227,16 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
             print("Warning: Solve failed")
 
         for i in range(n_drones):
-            solver_data.results[i].advance_for_next_solve_step()
-            solver_data.previous_results[i] = deepcopy(solver_data.results[i])
-        control = np.stack([r.pos[1] for r in solver_data.results], axis=0)
+            solver_data.trajectory[i].step()
+            solver_data.previous_trajectory[i] = deepcopy(solver_data.trajectory[i])
+        control = np.stack([r.pos[1] for r in solver_data.trajectory], axis=0)
         control = np.concat([control, np.zeros((control.shape[0], 10))], axis=-1)
         control = control[None, ...]
 
         sim.state_control(control)
         sim.step(sim.freq // mpc_freq)
         if render:
-            render_solutions(sim, [r.pos for r in solver_data.results])
+            render_solutions(sim, [traj.pos for traj in solver_data.trajectory])
             for i in range(n_drones):
                 draw_points(sim, waypoints["pos"][:, i, :], rgba=rgbas[i], size=0.02)
             sim.render()
@@ -248,14 +248,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
 
 
 def plot_trajectories(sim, waypoints, pos_amswarm, pos_amswarmpy):
-    """Plot comparison of trajectories between AMSwarm and AMSwarmPy implementations.
-
-    Args:
-        sim: Simulation object containing number of drones
-        waypoints: Dictionary of waypoints for each drone
-        pos_amswarm: Dictionary containing AMSwarm trajectory results
-        pos_amswarmpy: Dictionary containing AMSwarmPy trajectory results
-    """
+    """Plot comparison of trajectories between AMSwarm and AMSwarmPy implementations."""
 
     fig = plt.figure(figsize=(12, 8))
     ax = fig.add_subplot(111, projection="3d")

@@ -8,7 +8,7 @@ from .constraint import (
     InequalityConstraint,
     PolarInequalityConstraint,
 )
-from .data import Result, SolverData, SolverSettings
+from .data import SolverData, SolverSettings, Trajectory
 
 
 def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
@@ -61,9 +61,9 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
         data.constraints.append(EqualityConstraint(G_wa, h_wa, settings.mpc.waypoints_acc_tol))
 
     # Input continuity cost and/or equality constraint
-    u_0 = data.previous_results[data.rank].u_pos[0]
-    u_dot_0 = data.previous_results[data.rank].u_vel[0]
-    u_ddot_0 = data.previous_results[data.rank].u_acc[0]
+    u_0 = data.previous_trajectory[data.rank].u_pos[0]
+    u_dot_0 = data.previous_trajectory[data.rank].u_vel[0]
+    u_ddot_0 = data.previous_trajectory[data.rank].u_acc[0]
     h_u = np.concatenate([u_0, u_dot_0, u_ddot_0])
     data.cost.linear += -2 * settings.weights.input_continuity * data.matrices.G_u.T @ h_u
     if settings.constraints.input_continuity:
@@ -132,7 +132,7 @@ def spline2states(data: SolverData, settings: SolverSettings) -> SolverData:
     u_pos = (data.matrices.W @ zeta).T.reshape((K, 3))
     u_vel = (data.matrices.W_dot @ zeta).T.reshape((K, 3))
     u_acc = (data.matrices.W_ddot @ zeta).T.reshape(K, 3)
-    data.results[data.rank] = Result(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc)
+    data.trajectory[data.rank] = Trajectory(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc)
     return data
 
 

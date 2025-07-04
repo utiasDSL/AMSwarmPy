@@ -55,7 +55,7 @@ def simulate(waypoints):
 
     t0 = time.perf_counter()
     drone_results = [
-        amswarmpy.Result.initial_result(initial_positions[i], settings["MPCSettings"]["K"])
+        amswarmpy.Trajectory.init(initial_positions[i], settings["MPCSettings"]["K"])
         for i in range(num_drones)
     ]
     t1 = time.perf_counter()

@@ -3,9 +3,9 @@ from .data import (
     ConstraintSettings,
     Limits,
     MPCSettings,
-    Result,
     SolverData,
     SolverSettings,
+    Trajectory,
     Weights,
 )
 from .drone import solve_drone
@@ -14,9 +14,9 @@ __all__ = [
     "ConstraintSettings",
     "Limits",
     "MPCSettings",
-    "Result",
     "SolverData",
     "SolverSettings",
+    "Trajectory",
     "Weights",
     "solve_drone",
     "solve_swarm",

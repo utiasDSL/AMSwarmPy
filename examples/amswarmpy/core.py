@@ -16,7 +16,6 @@ def solve_swarm(
     # Alternatively, use assign_tuples(list(combinations(range(n_drones), 2)))
     avoidance_map = {i: [j for j in range(n_drones) if j != i] for i in range(n_drones)}
 
-    # Initialize results
     is_success = np.zeros(n_drones, dtype=bool)
     iters = np.zeros(n_drones)
 
@@ -30,12 +29,12 @@ def solve_swarm(
         for avoid_drone in avoidance_map[i]:
             # Time taken: 5.00e-05 seconds
             intersect = check_intersection(
-                data.previous_results[i].pos,
-                data.previous_results[avoid_drone].pos,
+                data.previous_trajectory[i].pos,
+                data.previous_trajectory[avoid_drone].pos,
                 1.0 / settings.limits.collision,
             )
             if intersect:
-                obstacle_positions.append(data.previous_results[avoid_drone].pos.flatten())
+                obstacle_positions.append(data.previous_trajectory[avoid_drone].pos.flatten())
 
         data.rank = i
         data.obstacle_positions = obstacle_positions

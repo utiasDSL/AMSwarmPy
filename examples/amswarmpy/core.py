@@ -9,21 +9,11 @@ from numpy.typing import NDArray
 from .drone import SolverData, SolverSettings, solve_drone
 
 
-def solve(
-    current_time: float,
-    states: NDArray,
-    waypoints: dict[str, NDArray],
-    data: SolverData,
-    settings: SolverSettings,
+def solve_swarm(
+    states: NDArray, t: float, data: SolverData, settings: SolverSettings
 ) -> tuple[list[bool], list[int], SolverData]:
-    # Validate input sizes
     n_drones = len(states)
-    if len(data.previous_results) != n_drones:
-        raise ValueError("Input lists must all have same length as number of drones in swarm")
-    assert isinstance(settings, SolverSettings), f"Unexpected type: {type(settings)}"
-
-    limits = settings.limits
-    envelope = 1.0 / np.array([limits.collision_x, limits.collision_y, limits.collision_z])
+    envelope = 1.0 / settings.limits.collision
     # Alternatively, use assign_tuples(list(combinations(range(n_drones), 2)))
     avoidance_map = {i: [j for j in range(n_drones) if j != i] for i in range(n_drones)}
 
@@ -47,7 +37,7 @@ def solve(
                 obstacle_envelopes.append(envelope)
 
         data.rank = i
-        data.current_time = current_time
+        data.current_time = t
         data.obstacle_positions = obstacle_positions
         data.obstacle_envelopes = obstacle_envelopes
         data.x_0 = states[i]

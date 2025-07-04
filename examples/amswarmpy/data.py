@@ -246,9 +246,10 @@ class Limits:
     pos_max: np.ndarray = field(default_factory=lambda: np.full(3, 10))  # Maximum position bounds
     vel_max: float = 1.73  # Maximum velocity
     acc_max: float = 0.75 * 9.81  # Maximum acceleration (0.75g)
-    collision_x: float = 0.25  # Collision envelope width in x
-    collision_y: float = 0.25  # Collision envelope width in y
-    collision_z: float = 2.0 / 3.0  # Collision envelope width in z
+    collision: NDArray | None = None
+
+    def __post_init__(self):
+        self.collision = np.asarray(self.collision)
 
 
 @partial(jax.jit, static_argnames=("K"))

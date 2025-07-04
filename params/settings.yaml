@@ -35,9 +35,7 @@ Limits:
   pos_max: [10, 10, 10]  # Maximum position of the AMSwarm drones
   vel_max: 1.73  # Maximum velocity of the AMSwarm drones
   acc_max: 7.3575  # Maximum force of the AMSwarm drones (0.75 gs)
-  collision_x: 0.25  # Length of the drone in the x direction
-  collision_y: 0.25  # Length of the drone in the y direction
-  collision_z: 0.6667  # Length of the drone in the z direction - larger due to downwash effect
+  collision: [0.25, 0.25, 0.6667]  # Collision envelope width in x, y, z
 
 Dynamics:
   # --- 8Hz pos + vel input model, with >=80Hz Mellinger controller --- #

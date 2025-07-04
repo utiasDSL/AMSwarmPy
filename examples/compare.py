@@ -181,7 +181,8 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
 
     trajectories = np.zeros((n_steps, n_drones, 3))  # Initialize trajectories storage
 
-    solver_data = amswarmpy.SolverData.init(waypoints=waypoints, K=settings["MPCSettings"]["K"])
+    K = settings["MPCSettings"]["K"]
+    solver_data = amswarmpy.SolverData.init(waypoints=waypoints, K=K)
 
     # Initialize data and settings
     weights = amswarmpy.Weights(**settings["Weights"])
@@ -207,7 +208,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     solver_data.init_cost(weights)
 
     states = np.concat((waypoints["pos"][0], np.zeros((n_drones, 3))), axis=-1)
-    success, _, solver_data = amswarmpy.solve(0, states, waypoints, solver_data, solver_settings)
+    success, _, solver_data = amswarmpy.solve_swarm(states, 0, solver_data, solver_settings)
     if not all(success):
         print("Warning: Solve failed")
 
@@ -221,9 +222,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         t = step / mpc_freq
 
         states = np.concat((pos, vel), axis=-1)
-        success, _, solver_data = amswarmpy.solve(
-            t, states, waypoints, solver_data, solver_settings
-        )
+        success, _, solver_data = amswarmpy.solve_swarm(states, t, solver_data, solver_settings)
         if not all(success):
             print("Warning: Solve failed")
 

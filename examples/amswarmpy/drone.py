@@ -22,11 +22,11 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     if data.zeta is None:
         data.zeta = np.zeros(data.cost.quad.shape[0])  # Init optimization variable
 
-    mask, steps = filter_horizon(data.waypoints["time"], data.current_time, K, freq)
+    mask, steps = filter_horizon(data.waypoints["time"][:, data.rank], data.current_time, K, freq)
     # Separate and reshape waypoints into position, velocity, and acceleration vectors
-    des_pos = data.waypoints["pos"][mask].flatten()
-    des_vel = data.waypoints["vel"][mask].flatten()
-    des_acc = data.waypoints["acc"][mask].flatten()
+    des_pos = data.waypoints["pos"][:, data.rank][mask].flatten()
+    des_vel = data.waypoints["vel"][:, data.rank][mask].flatten()
+    des_acc = data.waypoints["acc"][:, data.rank][mask].flatten()
 
     # Extract penalized steps from first column of waypoints
     # First possible penalized step is 1, NOT 0 (input cannot affect initial state)

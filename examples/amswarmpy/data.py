@@ -38,7 +38,12 @@ class SolverData:
     previous_trajectory: Trajectory
     obstacle_positions: list[NDArray]  # TODO: Move to fixed-sized tensor
     distance_matrix: NDArray  # n_drones x n_drones
+    # Constraints
     constraints: list[Constraint]
+    pos_constraint: EqualityConstraint | None = None
+    vel_constraint: EqualityConstraint | None = None
+    acc_constraint: EqualityConstraint | None = None
+    input_continuity_constraint: EqualityConstraint | None = None
 
     @staticmethod
     def init(
@@ -83,6 +88,63 @@ class SolverData:
             distance_matrix=np.zeros((n_drones, n_drones)),
             constraints=[],
         )
+
+
+@dataclass
+class EqualityConstraint:
+    G: Array
+    h: Array
+    _G_T_G: Array
+    _G_T_h: Array
+    tol: float = 1e-2
+
+    @staticmethod
+    def init(G: Array, h: Array, tol: float = 1e-2) -> EqualityConstraint:
+        G_T_G = G.T @ G
+        G_T_h = G.T @ h
+        return EqualityConstraint(G, h, G_T_G, G_T_h, tol)
+
+    @staticmethod
+    def quadratic_term(cnstr: EqualityConstraint) -> Array:
+        return cnstr._G_T_G
+
+    @staticmethod
+    def linear_term(cnstr: EqualityConstraint) -> Array:
+        return -cnstr._G_T_h
+
+    @staticmethod
+    def satisfied(cnstr: EqualityConstraint, zeta: Array) -> bool:
+        return np.max(np.abs(cnstr.G @ zeta - cnstr.h)) <= cnstr.tol
+
+
+@dataclass
+class InequalityConstraint:
+    G: Array
+    h: Array
+    _G_T_G: Array
+    _G_T_h: Array
+    tol: float = 1e-2
+
+    @staticmethod
+    def init(G: Array, h: Array, tol: float = 1e-2) -> InequalityConstraint:
+        G_T_G = G.T @ G
+        G_T_h = G.T @ h
+        return InequalityConstraint(G, h, G_T_G, G_T_h, tol)
+
+    @staticmethod
+    def quadratic_term(cnstr: InequalityConstraint) -> Array:
+        return cnstr._G_T_G
+
+    @staticmethod
+    def linear_term(cnstr: InequalityConstraint) -> Array:
+        return -cnstr._G_T_h + cnstr.G.T @ cnstr.slack
+
+    @staticmethod
+    def update(self, x: Array) -> None:
+        self.slack = np.maximum(0, -self.G @ x + self.h)
+
+    def is_satisfied(self, x: Array) -> bool:
+        return np.max(self.G @ x - self.h) < self.tol
 
 
 @dataclass

@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from .constraint import EqualityConstraint, InequalityConstraint, PolarInequalityConstraint
-from .data import SolverData
+from .constraint import InequalityConstraint, PolarInequalityConstraint
+from .data import EqualityConstraint, SolverData
 from .settings import SolverSettings
 
 
@@ -61,7 +61,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     data.quad_cost[data.rank] += 2 * settings.pos_weight * G_wp.T @ G_wp
     data.linear_cost[data.rank] += -2 * settings.pos_weight * G_wp.T @ h_wp
     if settings.pos_constraints:
-        data.constraints.append(EqualityConstraint(G_wp, h_wp, settings.waypoints_pos_tol))
+        data.pos_constraint = EqualityConstraint.init(G_wp, h_wp, settings.waypoints_pos_tol)
 
     # Waypoint velocity cost and/or equality constraint
     G_wv = data.matrices.M_v_S_u_W_input[wp_idx]
@@ -69,7 +69,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     data.quad_cost[data.rank] += 2 * settings.vel_weight * G_wv.T @ G_wv
     data.linear_cost[data.rank] += -2 * settings.vel_weight * G_wv.T @ h_wv
     if settings.vel_constraints:
-        data.constraints.append(EqualityConstraint(G_wv, h_wv, settings.waypoints_vel_tol))
+        data.vel_constraint = EqualityConstraint.init(G_wv, h_wv, settings.waypoints_vel_tol)
 
     # Waypoint acceleration cost and/or equality constraint
     G_wa = data.matrices.M_a_S_u_prime_W_input[wp_idx]
@@ -77,7 +77,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     data.quad_cost[data.rank] += 2 * settings.acc_weight * G_wa.T @ G_wa
     data.linear_cost[data.rank] += -2 * settings.acc_weight * G_wa.T @ h_wa
     if settings.acc_constraints:
-        data.constraints.append(EqualityConstraint(G_wa, h_wa, settings.waypoints_acc_tol))
+        data.acc_constraint = EqualityConstraint.init(G_wa, h_wa, settings.waypoints_acc_tol)
 
     # Input continuity cost and/or equality constraint
     u_0 = data.previous_trajectory.u_pos[data.rank, 0]
@@ -86,8 +86,8 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     h_u = np.concatenate([u_0, u_dot_0, u_ddot_0])
     data.linear_cost[data.rank] += -2 * settings.input_continuity_weight * data.matrices.G_u.T @ h_u
     if settings.input_continuity_constraints:
-        data.constraints.append(
-            EqualityConstraint(data.matrices.G_u, h_u, settings.input_continuity_tol)
+        data.input_continuity_constraint = EqualityConstraint.init(
+            data.matrices.G_u, h_u, settings.input_continuity_tol
         )
 
     # Position constraint
@@ -168,6 +168,18 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
     quad_constraint_terms = np.zeros_like(data.quad_cost[data.rank])
     linear_constraint_terms = np.zeros(data.linear_cost[data.rank].shape[0])
 
+    if settings.pos_constraints:
+        quad_constraint_terms += EqualityConstraint.quadratic_term(data.pos_constraint)
+        linear_constraint_terms += EqualityConstraint.linear_term(data.pos_constraint)
+    if settings.vel_constraints:
+        quad_constraint_terms += EqualityConstraint.quadratic_term(data.vel_constraint)
+        linear_constraint_terms += EqualityConstraint.linear_term(data.vel_constraint)
+    if settings.acc_constraints:
+        quad_constraint_terms += EqualityConstraint.quadratic_term(data.acc_constraint)
+        linear_constraint_terms += EqualityConstraint.linear_term(data.acc_constraint)
+    if settings.input_continuity_constraints:
+        quad_constraint_terms += EqualityConstraint.quadratic_term(data.input_continuity_constraint)
+        linear_constraint_terms += EqualityConstraint.linear_term(data.input_continuity_constraint)
     for constraint in data.constraints:
         quad_constraint_terms += constraint.get_quadratic_term()
         linear_constraint_terms += constraint.get_linear_term()
@@ -187,12 +199,22 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
         for c in data.constraints:
             c.update(zeta)
 
-        if all(c.is_satisfied(zeta) for c in data.constraints):
+        if constraints_satisfied(zeta, data):
             data.zeta[data.rank] = zeta
             return True, i, data  # Exit loop, indicate success
 
         # Recalculate linear term for Bregman multiplier
         linear_constraint_terms[...] = 0
+        if settings.pos_constraints:
+            linear_constraint_terms += EqualityConstraint.linear_term(data.pos_constraint)
+        if settings.vel_constraints:
+            linear_constraint_terms += EqualityConstraint.linear_term(data.vel_constraint)
+        if settings.acc_constraints:
+            linear_constraint_terms += EqualityConstraint.linear_term(data.acc_constraint)
+        if settings.input_continuity_constraints:
+            linear_constraint_terms += EqualityConstraint.linear_term(
+                data.input_continuity_constraint
+            )
         for constraint in data.constraints:
             linear_constraint_terms += constraint.get_linear_term()
 
@@ -211,7 +233,7 @@ def solve_drone(data: SolverData, settings: SolverSettings) -> tuple[bool, int, 
     """Main solve function to be called by user."""
     # Reset cost and clear carryover constraints from previous solves
     data = reset_cost_matrices(data)
-    data.constraints.clear()  # Ensure no carryover updates from previous solve
+    data = reset_constraints(data)
     data = add_constraints(data, settings)  # Build new constraints and add to cost matrices
     success, iters, data = am_solve(data, settings)  # Solve with AM algorithm
     data = spline2states(data, settings)
@@ -223,6 +245,38 @@ def reset_cost_matrices(data: SolverData) -> SolverData:
     data.quad_cost[...] = data.quad_cost_init
     data.linear_cost[...] = 0
     return data
+
+
+def reset_constraints(data: SolverData) -> SolverData:
+    """Reset constraints to initial values"""
+    data.constraints.clear()
+    data.eq_pos_cnstr_G = None
+    data.eq_pos_cnstr_h = None
+    return data
+
+
+def constraints_satisfied(zeta: NDArray, data: SolverData) -> bool:
+    """Check if all constraints are satisfied"""
+    for constraint in data.constraints:
+        if not constraint.is_satisfied(zeta):
+            return False
+    if data.pos_constraint is not None and not EqualityConstraint.satisfied(
+        data.pos_constraint, zeta
+    ):
+        return False
+    if data.vel_constraint is not None and not EqualityConstraint.satisfied(
+        data.vel_constraint, zeta
+    ):
+        return False
+    if data.acc_constraint is not None and not EqualityConstraint.satisfied(
+        data.acc_constraint, zeta
+    ):
+        return False
+    if data.input_continuity_constraint is not None and not EqualityConstraint.satisfied(
+        data.input_continuity_constraint, zeta
+    ):
+        return False
+    return True
 
 
 def filter_horizon(times: NDArray, t: float, K: int, mpc_freq: float) -> tuple[NDArray, NDArray]:

@@ -7,7 +7,28 @@ SolverSettings:
   rho_max: 5000000.0 # Maximum value of the penalty parameter
   max_iters: 1000 # Maximum number of iterations
 
-MPCSettings:
+  # Constraints
+  pos_constraints: true
+  vel_constraints: false
+  acc_constraints: false
+  input_continuity_constraints: true
+
+  # Weights
+  pos_weight: 70000.  # Weight of the position tracking objective in the cost
+  vel_weight: 0.  # Weight of the velocity tracking objective in the cost
+  acc_weight: 0.  # Weight of the acceleration tracking objective in the cost
+  smoothness_weight: 10000.  # Weight of the smoothness objective in the cost
+  input_smoothness_weight: 10000.  # Weight of the input smoothness objective in the cost
+  input_continuity_weight: 100.  # Weight of the input continuity objective in the cost
+
+  # Limits
+  pos_min: [-10, -10, 0.1]  # Minimum position of the AMSwarm drones
+  pos_max: [10, 10, 10]  # Maximum position of the AMSwarm drones
+  vel_max: 1.73  # Maximum velocity of the AMSwarm drones
+  acc_max: 7.3575  # Maximum force of the AMSwarm drones (0.75 gs)
+  collision_envelope: [0.25, 0.25, 0.6667]  # Collision envelope width in x, y, z
+
+  # MPC
   K: 35  # Number of timesteps in the optimization horizon
   N: 10  # Spline order for AMSwarm trajectories
   freq: 8  # MPC control frequency of AMSwarm in Hz
@@ -15,27 +36,11 @@ MPCSettings:
   waypoints_pos_tol: 0.1  # Tolerance for the waypoints position constraint
   waypoints_vel_tol: 0.01  # Tolerance for the waypoints velocity constraint
   waypoints_acc_tol: 0.01  # Tolerance for the waypoints acceleration
-  pos_tol: 0.01  # Tolerance for the input position constraint
-  vel_tol: 0.01  # Tolerance for the input velocity constraint
-  acc_tol: 0.01  # Tolerance for the input acceleration
+  pos_limit_tol: 0.01  # Tolerance for the input position constraint
+  vel_limit_tol: 0.01  # Tolerance for the input velocity constraint
+  acc_limit_tol: 0.01  # Tolerance for the input acceleration
   input_continuity_tol: 0.01  # Tolerance for the input continuity constraint
   collision_tol: 0.01  # Tolerance for the collision avoidance constraint
-
-
-Weights:
-  pos: 70000.  # Weight of the position tracking objective in the cost
-  vel: 0.  # Weight of the velocity tracking objective in the cost
-  acc: 0.  # Weight of the acceleration tracking objective in the cost
-  smoothness: 10000.  # Weight of the smoothness objective in the cost
-  input_smoothness: 10000.  # Weight of the input smoothness objective in the cost
-  input_continuity: 100.  # Weight of the input continuity objective in the cost
-  
-Limits:
-  pos_min: [-10, -10, 0.1]  # Minimum position of the AMSwarm drones
-  pos_max: [10, 10, 10]  # Maximum position of the AMSwarm drones
-  vel_max: 1.73  # Maximum velocity of the AMSwarm drones
-  acc_max: 7.3575  # Maximum force of the AMSwarm drones (0.75 gs)
-  collision: [0.25, 0.25, 0.6667]  # Collision envelope width in x, y, z
 
 Dynamics:
   # --- 8Hz pos + vel input model, with >=80Hz Mellinger controller --- #

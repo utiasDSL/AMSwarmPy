@@ -14,7 +14,7 @@ def solve_swarm(
     n_drones = len(states)
     avoidance_map = {i: [j for j in range(n_drones) if j != i] for i in range(n_drones)}
     pos = data.previous_trajectory.pos
-    col = 1.0 / settings.limits.collision
+    col = 1.0 / settings.collision_envelope
     intersect = np.any(
         np.linalg.norm((pos[None, ...] - pos[:, None, ...]) * col, axis=-1) <= 1.0, axis=-1
     )
@@ -48,7 +48,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     """
     # Extract waypoints in current horizon. Each row is a waypoint of form:
     # [k, x, y, z, vx, vy, vz, ax, ay, az]. k is discrete STEP in current horizon
-    K, freq = settings.mpc.K, settings.mpc.freq
+    K, freq = settings.K, settings.freq
     assert data.zeta is not None, "Zeta must be initialized before adding constraints"
 
     mask, steps = filter_horizon(data.waypoints["time"][:, data.rank], data.current_time, K, freq)
@@ -69,43 +69,43 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     # Waypoint position cost and/or equality constraint
     G_wp = data.matrices.M_p_S_u_W_input[wp_idx]
     h_wp = des_pos - data.matrices.M_p_S_x[wp_idx] @ x_0
-    data.cost.quad += 2 * settings.weights.pos * G_wp.T @ G_wp
-    data.cost.linear += -2 * settings.weights.pos * G_wp.T @ h_wp
-    if settings.constraints.pos:
-        data.constraints.append(EqualityConstraint(G_wp, h_wp, settings.mpc.waypoints_pos_tol))
+    data.cost.quad += 2 * settings.pos_weight * G_wp.T @ G_wp
+    data.cost.linear += -2 * settings.pos_weight * G_wp.T @ h_wp
+    if settings.pos_constraints:
+        data.constraints.append(EqualityConstraint(G_wp, h_wp, settings.waypoints_pos_tol))
 
     # Waypoint velocity cost and/or equality constraint
     G_wv = data.matrices.M_v_S_u_W_input[wp_idx]
     h_wv = des_vel - data.matrices.M_v_S_x[wp_idx] @ x_0
-    data.cost.quad += 2 * settings.weights.vel * G_wv.T @ G_wv
-    data.cost.linear += -2 * settings.weights.vel * G_wv.T @ h_wv
-    if settings.constraints.vel:
-        data.constraints.append(EqualityConstraint(G_wv, h_wv, settings.mpc.waypoints_vel_tol))
+    data.cost.quad += 2 * settings.vel_weight * G_wv.T @ G_wv
+    data.cost.linear += -2 * settings.vel_weight * G_wv.T @ h_wv
+    if settings.vel_constraints:
+        data.constraints.append(EqualityConstraint(G_wv, h_wv, settings.waypoints_vel_tol))
 
     # Waypoint acceleration cost and/or equality constraint
     G_wa = data.matrices.M_a_S_u_prime_W_input[wp_idx]
     h_wa = des_acc - data.matrices.M_a_S_x_prime[wp_idx] @ x_0
-    data.cost.quad += 2 * settings.weights.acc * G_wa.T @ G_wa
-    data.cost.linear += -2 * settings.weights.acc * G_wa.T @ h_wa
-    if settings.constraints.acc:
-        data.constraints.append(EqualityConstraint(G_wa, h_wa, settings.mpc.waypoints_acc_tol))
+    data.cost.quad += 2 * settings.acc_weight * G_wa.T @ G_wa
+    data.cost.linear += -2 * settings.acc_weight * G_wa.T @ h_wa
+    if settings.acc_constraints:
+        data.constraints.append(EqualityConstraint(G_wa, h_wa, settings.waypoints_acc_tol))
 
     # Input continuity cost and/or equality constraint
     u_0 = data.previous_trajectory.u_pos[data.rank, 0]
     u_dot_0 = data.previous_trajectory.u_vel[data.rank, 0]
     u_ddot_0 = data.previous_trajectory.u_acc[data.rank, 0]
     h_u = np.concatenate([u_0, u_dot_0, u_ddot_0])
-    data.cost.linear += -2 * settings.weights.input_continuity * data.matrices.G_u.T @ h_u
-    if settings.constraints.input_continuity:
+    data.cost.linear += -2 * settings.input_continuity_weight * data.matrices.G_u.T @ h_u
+    if settings.input_continuity_constraints:
         data.constraints.append(
-            EqualityConstraint(data.matrices.G_u, h_u, settings.mpc.input_continuity_tol)
+            EqualityConstraint(data.matrices.G_u, h_u, settings.input_continuity_tol)
         )
 
     # Position constraint
-    upper = np.tile(settings.limits.pos_max, K + 1) - data.matrices.M_p_S_x @ x_0
-    lower = -np.tile(settings.limits.pos_min, K + 1) + data.matrices.M_p_S_x @ x_0
+    upper = np.tile(settings.pos_max, K + 1) - data.matrices.M_p_S_x @ x_0
+    lower = -np.tile(settings.pos_min, K + 1) + data.matrices.M_p_S_x @ x_0
     h_p = np.concatenate([upper, lower])
-    data.constraints.append(InequalityConstraint(data.matrices.G_p, h_p, settings.mpc.pos_tol))
+    data.constraints.append(InequalityConstraint(data.matrices.G_p, h_p, settings.pos_limit_tol))
 
     # Velocity constraint
     c_v = data.matrices.M_v_S_x @ x_0
@@ -114,9 +114,9 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
             data.matrices.M_v_S_u_W_input,
             c_v,
             -float("inf"),
-            settings.limits.vel_max,
+            settings.vel_max,
             1.0,
-            settings.mpc.vel_tol,
+            settings.vel_limit_tol,
         )
     )
 
@@ -127,15 +127,15 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
             data.matrices.M_a_S_u_prime_W_input,
             c_a,
             -float("inf"),
-            settings.limits.acc_max,
+            settings.acc_max,
             1.0,
-            settings.mpc.acc_tol,
+            settings.acc_limit_tol,
         )
     )
 
     # Collision constraints
     for pos in data.obstacle_positions:
-        envelope = np.tile(1 / settings.limits.collision, K + 1)
+        envelope = np.tile(1 / settings.collision_envelope, K + 1)
         G_c = envelope[:, None] * data.matrices.M_p_S_u_W_input
         c_c = envelope * (data.matrices.M_p_S_x @ x_0 - pos)
         data.constraints.append(
@@ -144,8 +144,8 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
                 c_c,
                 1.0,
                 float("inf"),
-                settings.mpc.bf_gamma,
-                settings.mpc.collision_tol,
+                settings.bf_gamma,
+                settings.collision_tol,
             )
         )
     return data
@@ -153,7 +153,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
 
 def spline2states(data: SolverData, settings: SolverSettings) -> SolverData:
     """Extract position, velocity, and acceleration trajectories from solution coefficients."""
-    K = settings.mpc.K
+    K = settings.K
     # Extract position trajectory from state trajectory
     zeta = data.zeta[data.rank]
     x_0 = data.x_0[data.rank]

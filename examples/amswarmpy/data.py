@@ -13,7 +13,6 @@ from jax import Array
 from numpy.typing import NDArray
 
 from .constraint import Constraint
-from .settings import Weights
 from .spline import bernstein_input, bernstein_matrices
 
 
@@ -53,9 +52,16 @@ class SolverData:
     def init_matrices(self, A, B, A_prime, B_prime, K: int, N: int, freq: int):
         self.matrices = Matrices.from_dynamics(A, B, A_prime, B_prime, K, N, freq)
 
-    def init_cost(self, weights: Weights):
+    def init_cost(
+        self,
+        smoothness_weight: float,
+        input_smoothness_weight: float,
+        input_continuity_weight: float,
+    ):
         assert self.matrices is not None, "Matrices must be initialized before cost"
-        self.cost = CostData.init(weights, self.matrices)
+        self.cost = CostData.init(
+            smoothness_weight, input_smoothness_weight, input_continuity_weight, self.matrices
+        )
 
 
 @dataclass
@@ -173,22 +179,27 @@ class CostData:
     linear_smoothness_const: Array
 
     @staticmethod
-    def init(weights: Weights, matrices: Matrices):
+    def init(
+        smoothness_weight: float,
+        input_smoothness_weight: float,
+        input_continuity_weight: float,
+        matrices: Matrices,
+    ):
         K, N = matrices.W.shape[0] // 3, matrices.W.shape[1] // 3 - 1
-        quad = 2 * weights.input_smoothness * (matrices.W_ddot.T @ matrices.W_ddot)
+        quad = 2 * input_smoothness_weight * (matrices.W_ddot.T @ matrices.W_ddot)
         a_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
         quad += (
             2
-            * weights.smoothness
+            * smoothness_weight
             * matrices.W_input.T
             @ matrices.S_u_prime[a_idx].T
             @ matrices.S_u_prime[a_idx]
             @ matrices.W_input
         )
-        quad += 2 * weights.input_continuity * matrices.G_u.T @ matrices.G_u
+        quad += 2 * input_continuity_weight * matrices.G_u.T @ matrices.G_u
         linear = np.zeros(3 * (N + 1))
         linear_smoothness_const = (
-            2 * weights.smoothness * matrices.M_a_S_u_prime_W_input.T @ matrices.M_a_S_x_prime
+            2 * smoothness_weight * matrices.M_a_S_u_prime_W_input.T @ matrices.M_a_S_x_prime
         )
         return CostData(
             quad=quad,

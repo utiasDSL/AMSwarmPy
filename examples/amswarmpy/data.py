@@ -26,12 +26,12 @@ class SolverData:
     # Shared data across drones
     current_time: float
     rank: int  # TODO: Remove
+    quad_cost_init: Array  # 3 * (N + 1) x 3 * (N + 1)
+    linear_cost_smoothness_const: Array  # 3 * (N + 1)
 
     # Swarm data. Tensors of shape (n_drones, ...)
-    quad_cost: Array
-    quad_cost_init: Array
-    linear_cost: Array
-    linear_cost_smoothness_const: Array
+    quad_cost: Array  # n_drones x 3 * (N + 1) x 3 * (N + 1)
+    linear_cost: Array  # n_drones x 3 * (N + 1)
     zeta: NDArray  # n_drones x 3 * (N + 1)
     x_0: NDArray  # n_drones x 6 (pos, vel)
     trajectory: Trajectory
@@ -61,8 +61,8 @@ class SolverData:
         x_0 = np.concat((waypoints["pos"][0, :], waypoints["vel"][0, :]), axis=-1)
         matrices = Matrices.from_dynamics(A, B, A_prime, B_prime, K, N, freq)
 
-        quad_cost, linear_cost, linear_cost_smoothness_const = init_cost(
-            smoothness_weight, input_smoothness_weight, input_continuity_weight, matrices
+        quad_cost, linear_cost_smoothness_const = init_cost(
+            smoothness_weight, input_smoothness_weight, input_continuity_weight, matrices, n_drones
         )
 
         return SolverData(
@@ -72,8 +72,8 @@ class SolverData:
             current_time=waypoints["time"][0, 0],
             rank=0,
             quad_cost=quad_cost,
-            quad_cost_init=quad_cost.copy(),
-            linear_cost=linear_cost,
+            quad_cost_init=quad_cost[0].copy(),
+            linear_cost=np.zeros((n_drones, 3 * (N + 1))),
             linear_cost_smoothness_const=linear_cost_smoothness_const,
             zeta=zeta,
             x_0=x_0,
@@ -195,8 +195,9 @@ def init_cost(
     input_smoothness_weight: float,
     input_continuity_weight: float,
     matrices: Matrices,
-) -> tuple[Array, Array, Array]:
-    K, N = matrices.W.shape[0] // 3, matrices.W.shape[1] // 3 - 1
+    n_drones: int,
+) -> tuple[Array, Array]:
+    K = matrices.W.shape[0] // 3
     quad = 2 * input_smoothness_weight * (matrices.W_ddot.T @ matrices.W_ddot)
     a_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
     quad += (
@@ -208,11 +209,11 @@ def init_cost(
         @ matrices.W_input
     )
     quad += 2 * input_continuity_weight * matrices.G_u.T @ matrices.G_u
-    linear = np.zeros(3 * (N + 1))
+    quad = np.tile(quad, (n_drones, 1, 1))
     linear_smoothness_const = (
         2 * smoothness_weight * matrices.M_a_S_u_prime_W_input.T @ matrices.M_a_S_x_prime
     )
-    return quad, linear, linear_smoothness_const
+    return quad, linear_smoothness_const
 
 
 @partial(jax.jit, static_argnames=("K"))

@@ -12,30 +12,20 @@ def solve_swarm(
     states: NDArray, t: float, data: SolverData, settings: SolverSettings
 ) -> tuple[list[bool], list[int], SolverData]:
     n_drones = len(states)
-    avoidance_map = {i: [j for j in range(n_drones) if j != i] for i in range(n_drones)}
     pos = data.previous_trajectory.pos
     col = 1.0 / settings.collision_envelope
     data.distance_matrix = np.linalg.norm((pos[None, ...] - pos[:, None, ...]) * col, axis=-1)
-
-    is_success = np.zeros(n_drones, dtype=bool)
-    iters = np.zeros(n_drones)
-
-    # Solve for each drone
     data.x_0 = states
     data.current_time = t
+
+    # Solve for each drone
+    is_success = np.zeros(n_drones, dtype=bool)
+    iters = np.zeros(n_drones)
     for i in range(n_drones):
         data.rank = i
-        # Check for potential collisions with drones this drone needs to avoid
-        obstacle_positions = []
-        for avoid_drone in avoidance_map[i]:
-            if np.any(data.distance_matrix <= 1.0, axis=-1)[i, avoid_drone]:
-                obstacle_positions.append(data.previous_trajectory.pos[avoid_drone].flatten())
-        data.obstacle_positions = obstacle_positions
-
-        success, num_iters, data = solve_drone(data, settings)  # Solve for this drone
+        success, num_iters, data = solve_drone(data, settings)
         is_success[i] = success
         iters[i] = num_iters
-
     return is_success, iters, data
 
 
@@ -61,31 +51,31 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
 
     # Output smoothness cost
     x_0 = data.x_0[data.rank]
-    data.linear_cost += data.linear_cost_smoothness_const @ x_0
+    data.linear_cost[data.rank] += data.linear_cost_smoothness_const @ x_0
 
     # --- Add constraints - see thesis document for derivations ---
     # Waypoint position cost and/or equality constraint
     G_wp = data.matrices.M_p_S_u_W_input[wp_idx]
     h_wp = des_pos - data.matrices.M_p_S_x[wp_idx] @ x_0
 
-    data.quad_cost += 2 * settings.pos_weight * G_wp.T @ G_wp
-    data.linear_cost += -2 * settings.pos_weight * G_wp.T @ h_wp
+    data.quad_cost[data.rank] += 2 * settings.pos_weight * G_wp.T @ G_wp
+    data.linear_cost[data.rank] += -2 * settings.pos_weight * G_wp.T @ h_wp
     if settings.pos_constraints:
         data.constraints.append(EqualityConstraint(G_wp, h_wp, settings.waypoints_pos_tol))
 
     # Waypoint velocity cost and/or equality constraint
     G_wv = data.matrices.M_v_S_u_W_input[wp_idx]
     h_wv = des_vel - data.matrices.M_v_S_x[wp_idx] @ x_0
-    data.quad_cost += 2 * settings.vel_weight * G_wv.T @ G_wv
-    data.linear_cost += -2 * settings.vel_weight * G_wv.T @ h_wv
+    data.quad_cost[data.rank] += 2 * settings.vel_weight * G_wv.T @ G_wv
+    data.linear_cost[data.rank] += -2 * settings.vel_weight * G_wv.T @ h_wv
     if settings.vel_constraints:
         data.constraints.append(EqualityConstraint(G_wv, h_wv, settings.waypoints_vel_tol))
 
     # Waypoint acceleration cost and/or equality constraint
     G_wa = data.matrices.M_a_S_u_prime_W_input[wp_idx]
     h_wa = des_acc - data.matrices.M_a_S_x_prime[wp_idx] @ x_0
-    data.quad_cost += 2 * settings.acc_weight * G_wa.T @ G_wa
-    data.linear_cost += -2 * settings.acc_weight * G_wa.T @ h_wa
+    data.quad_cost[data.rank] += 2 * settings.acc_weight * G_wa.T @ G_wa
+    data.linear_cost[data.rank] += -2 * settings.acc_weight * G_wa.T @ h_wa
     if settings.acc_constraints:
         data.constraints.append(EqualityConstraint(G_wa, h_wa, settings.waypoints_acc_tol))
 
@@ -94,7 +84,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     u_dot_0 = data.previous_trajectory.u_vel[data.rank, 0]
     u_ddot_0 = data.previous_trajectory.u_acc[data.rank, 0]
     h_u = np.concatenate([u_0, u_dot_0, u_ddot_0])
-    data.linear_cost += -2 * settings.input_continuity_weight * data.matrices.G_u.T @ h_u
+    data.linear_cost[data.rank] += -2 * settings.input_continuity_weight * data.matrices.G_u.T @ h_u
     if settings.input_continuity_constraints:
         data.constraints.append(
             EqualityConstraint(data.matrices.G_u, h_u, settings.input_continuity_tol)
@@ -133,20 +123,20 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     )
 
     # Collision constraints
-    for pos in data.obstacle_positions:
-        envelope = np.tile(1 / settings.collision_envelope, K + 1)
-        G_c = envelope[:, None] * data.matrices.M_p_S_u_W_input
-        c_c = envelope * (data.matrices.M_p_S_x @ x_0 - pos)
-        data.constraints.append(
-            PolarInequalityConstraint(
-                G_c,
-                c_c,
-                1.0,
-                float("inf"),
-                settings.bf_gamma,
-                settings.collision_tol,
+    for i in range(data.n_drones):
+        if i == data.rank:
+            continue
+        if np.any(data.distance_matrix <= 1.0, axis=-1)[i, data.rank]:
+            envelope = np.tile(1 / settings.collision_envelope, K + 1)
+            G_c = envelope[:, None] * data.matrices.M_p_S_u_W_input
+            c_c = envelope * (
+                data.matrices.M_p_S_x @ x_0 - data.previous_trajectory.pos[i].flatten()
             )
-        )
+            data.constraints.append(
+                PolarInequalityConstraint(
+                    G_c, c_c, 1.0, float("inf"), settings.bf_gamma, settings.collision_tol
+                )
+            )
     return data
 
 
@@ -170,19 +160,13 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
 
     Not meant to be overridden by child classes.
     """
-    # Initialize solver components
     rho = settings.rho_init
-
-    # Initialize optimization variables and matrices
-    Q = np.zeros_like(data.quad_cost)  # Combined quadratic terms
-    q = np.zeros(data.quad_cost.shape[0])  # Combined linear terms
     zeta = data.zeta[data.rank]  # Previously was zero initialized, now uses previous solution
-
-    bregman_mult = np.zeros(data.quad_cost.shape[0])  # Bregman multiplier
+    bregman_mult = np.zeros(data.quad_cost[data.rank].shape[0])  # Bregman multiplier
 
     # Aggregate quadratic and linear terms from all constraints
-    quad_constraint_terms = np.zeros_like(data.quad_cost)
-    linear_constraint_terms = np.zeros(data.linear_cost.shape[0])
+    quad_constraint_terms = np.zeros_like(data.quad_cost[data.rank])
+    linear_constraint_terms = np.zeros(data.linear_cost[data.rank].shape[0])
 
     for constraint in data.constraints:
         quad_constraint_terms += constraint.get_quadratic_term()
@@ -190,11 +174,11 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
 
     # Iteratively solve until solution found or max iterations reached
     for i in range(settings.max_iters):
-        Q = data.quad_cost + rho * quad_constraint_terms
+        Q = data.quad_cost[data.rank] + rho * quad_constraint_terms
 
         # Construct linear cost matrices
         linear_constraint_terms -= bregman_mult
-        q = data.linear_cost + rho * linear_constraint_terms
+        q = data.linear_cost[data.rank] + rho * linear_constraint_terms
 
         # Solve the QP
         zeta = np.linalg.solve(Q, -q)
@@ -236,7 +220,7 @@ def solve_drone(data: SolverData, settings: SolverSettings) -> tuple[bool, int, 
 
 def reset_cost_matrices(data: SolverData) -> SolverData:
     """Reset cost matrices to initial values"""
-    data.quad_cost = data.quad_cost_init.copy()
+    data.quad_cost[...] = data.quad_cost_init
     data.linear_cost[...] = 0
     return data
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 
 import jax
@@ -18,49 +18,70 @@ from .spline import bernstein_input, bernstein_matrices
 
 @dataclass
 class SolverData:
-    """Solver data"""
-
+    # Constants
+    n_drones: int
     waypoints: dict[str, NDArray]
+    matrices: Matrices
 
+    # Shared data across drones
+    current_time: float
+    rank: int  # TODO: Remove
+
+    # Swarm data. Tensors of shape (n_drones, ...)
+    quad_cost: Array
+    quad_cost_init: Array
+    linear_cost: Array
+    linear_cost_smoothness_const: Array
     zeta: NDArray  # n_drones x 3 * (N + 1)
+    x_0: NDArray  # n_drones x 6 (pos, vel)
     trajectory: Trajectory
     previous_trajectory: Trajectory
-
-    matrices: Matrices | None = None
-    current_time: float = 0.0
-    x_0: NDArray | None = None  # n_drones x 6 (pos, vel)
-    cost: CostData | None = None
-
-    obstacle_positions: list[NDArray] | None = None
-
-    constraints: list[Constraint] = field(default_factory=lambda: [])
-    rank: int = 0  # TODO: Remove
+    obstacle_positions: list[NDArray]  # TODO: Move to fixed-sized tensor
+    distance_matrix: NDArray  # n_drones x n_drones
+    constraints: list[Constraint]
 
     @staticmethod
-    def init(waypoints: dict[str, NDArray], K: int, N: int) -> SolverData:
+    def init(
+        waypoints: dict[str, NDArray],
+        K: int,
+        N: int,
+        A: NDArray,
+        B: NDArray,
+        A_prime: NDArray,
+        B_prime: NDArray,
+        freq: int,
+        smoothness_weight: float,
+        input_smoothness_weight: float,
+        input_continuity_weight: float,
+    ) -> SolverData:
         n_drones = waypoints["pos"].shape[1]
         trajectory = Trajectory.init(waypoints["pos"][0, :], K, n_drones)
         # Init optimization variable
         zeta = np.zeros((n_drones, 3 * (N + 1)))
-        return SolverData(
-            waypoints=waypoints,
-            zeta=zeta,
-            trajectory=deepcopy(trajectory),
-            previous_trajectory=trajectory,
+        x_0 = np.concat((waypoints["pos"][0, :], waypoints["vel"][0, :]), axis=-1)
+        matrices = Matrices.from_dynamics(A, B, A_prime, B_prime, K, N, freq)
+
+        quad_cost, linear_cost, linear_cost_smoothness_const = init_cost(
+            smoothness_weight, input_smoothness_weight, input_continuity_weight, matrices
         )
 
-    def init_matrices(self, A, B, A_prime, B_prime, K: int, N: int, freq: int):
-        self.matrices = Matrices.from_dynamics(A, B, A_prime, B_prime, K, N, freq)
-
-    def init_cost(
-        self,
-        smoothness_weight: float,
-        input_smoothness_weight: float,
-        input_continuity_weight: float,
-    ):
-        assert self.matrices is not None, "Matrices must be initialized before cost"
-        self.cost = CostData.init(
-            smoothness_weight, input_smoothness_weight, input_continuity_weight, self.matrices
+        return SolverData(
+            n_drones=n_drones,
+            waypoints=waypoints,
+            matrices=matrices,
+            current_time=waypoints["time"][0, 0],
+            rank=0,
+            quad_cost=quad_cost,
+            quad_cost_init=quad_cost.copy(),
+            linear_cost=linear_cost,
+            linear_cost_smoothness_const=linear_cost_smoothness_const,
+            zeta=zeta,
+            x_0=x_0,
+            trajectory=deepcopy(trajectory),
+            previous_trajectory=trajectory,
+            obstacle_positions=[],
+            distance_matrix=np.zeros((n_drones, n_drones)),
+            constraints=[],
         )
 
 
@@ -169,44 +190,29 @@ class Matrices:
         )
 
 
-@dataclass
-class CostData:
-    """Cost data"""
-
-    quad: Array
-    quad_init: Array
-    linear: Array
-    linear_smoothness_const: Array
-
-    @staticmethod
-    def init(
-        smoothness_weight: float,
-        input_smoothness_weight: float,
-        input_continuity_weight: float,
-        matrices: Matrices,
-    ):
-        K, N = matrices.W.shape[0] // 3, matrices.W.shape[1] // 3 - 1
-        quad = 2 * input_smoothness_weight * (matrices.W_ddot.T @ matrices.W_ddot)
-        a_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
-        quad += (
-            2
-            * smoothness_weight
-            * matrices.W_input.T
-            @ matrices.S_u_prime[a_idx].T
-            @ matrices.S_u_prime[a_idx]
-            @ matrices.W_input
-        )
-        quad += 2 * input_continuity_weight * matrices.G_u.T @ matrices.G_u
-        linear = np.zeros(3 * (N + 1))
-        linear_smoothness_const = (
-            2 * smoothness_weight * matrices.M_a_S_u_prime_W_input.T @ matrices.M_a_S_x_prime
-        )
-        return CostData(
-            quad=quad,
-            quad_init=quad.copy(),
-            linear=linear,
-            linear_smoothness_const=linear_smoothness_const,
-        )
+def init_cost(
+    smoothness_weight: float,
+    input_smoothness_weight: float,
+    input_continuity_weight: float,
+    matrices: Matrices,
+) -> tuple[Array, Array, Array]:
+    K, N = matrices.W.shape[0] // 3, matrices.W.shape[1] // 3 - 1
+    quad = 2 * input_smoothness_weight * (matrices.W_ddot.T @ matrices.W_ddot)
+    a_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
+    quad += (
+        2
+        * smoothness_weight
+        * matrices.W_input.T
+        @ matrices.S_u_prime[a_idx].T
+        @ matrices.S_u_prime[a_idx]
+        @ matrices.W_input
+    )
+    quad += 2 * input_continuity_weight * matrices.G_u.T @ matrices.G_u
+    linear = np.zeros(3 * (N + 1))
+    linear_smoothness_const = (
+        2 * smoothness_weight * matrices.M_a_S_u_prime_W_input.T @ matrices.M_a_S_x_prime
+    )
+    return quad, linear, linear_smoothness_const
 
 
 @partial(jax.jit, static_argnames=("K"))

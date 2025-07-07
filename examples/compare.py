@@ -185,17 +185,22 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     n_drones = sim.n_drones
     n_steps = int(waypoints["time"][-1, 0] * settings.freq)
 
-    trajectories = np.zeros((n_steps, n_drones, 3))  # Initialize trajectories storage
-    solver_data = amswarmpy.SolverData.init(waypoints=waypoints, K=settings.K, N=settings.N)
-
     dynamics = config["Dynamics"]
     A, B = np.asarray(dynamics["A"]), np.asarray(dynamics["B"])
     A_prime, B_prime = np.asarray(dynamics["A_prime"]), np.asarray(dynamics["B_prime"])
-    solver_data.init_matrices(A, B, A_prime, B_prime, settings.K, settings.N, settings.freq)
-    solver_data.init_cost(
-        settings.smoothness_weight,
-        settings.input_smoothness_weight,
-        settings.input_continuity_weight,
+    trajectories = np.zeros((n_steps, n_drones, 3))  # Initialize trajectories storage
+    solver_data = amswarmpy.SolverData.init(
+        waypoints=waypoints,
+        K=settings.K,
+        N=settings.N,
+        A=A,
+        B=B,
+        A_prime=A_prime,
+        B_prime=B_prime,
+        freq=settings.freq,
+        smoothness_weight=settings.smoothness_weight,
+        input_smoothness_weight=settings.input_smoothness_weight,
+        input_continuity_weight=settings.input_continuity_weight,
     )
 
     states = np.concat((waypoints["pos"][0], np.zeros((n_drones, 3))), axis=-1)

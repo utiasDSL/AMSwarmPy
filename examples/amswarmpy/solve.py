@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from .constraint import InequalityConstraint, PolarInequalityConstraint
-from .data import EqualityConstraint, SolverData
+from .constraint import PolarInequalityConstraint as OOPPolarInequalityConstraint
+from .data import EqualityConstraint, InequalityConstraint, SolverData, PolarInequalityConstraint
 from .settings import SolverSettings
 
 
@@ -94,32 +94,30 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     upper = np.tile(settings.pos_max, K + 1) - data.matrices.M_p_S_x @ x_0
     lower = -np.tile(settings.pos_min, K + 1) + data.matrices.M_p_S_x @ x_0
     h_p = np.concatenate([upper, lower])
-    data.constraints.append(InequalityConstraint(data.matrices.G_p, h_p, settings.pos_limit_tol))
+    data.max_pos_constraint = InequalityConstraint.init(
+        data.matrices.G_p, h_p, settings.pos_limit_tol
+    )
 
     # Velocity constraint
     c_v = data.matrices.M_v_S_x @ x_0
-    data.constraints.append(
-        PolarInequalityConstraint(
-            data.matrices.M_v_S_u_W_input,
-            c_v,
-            -float("inf"),
-            settings.vel_max,
-            1.0,
-            settings.vel_limit_tol,
-        )
+    data.max_vel_constraint = PolarInequalityConstraint.init(
+        data.matrices.M_v_S_u_W_input,
+        c_v,
+        -float("inf"),
+        settings.vel_max,
+        1.0,
+        settings.vel_limit_tol,
     )
 
     # Acceleration constraint
     c_a = data.matrices.M_a_S_x_prime @ x_0
-    data.constraints.append(
-        PolarInequalityConstraint(
-            data.matrices.M_a_S_u_prime_W_input,
-            c_a,
-            -float("inf"),
-            settings.acc_max,
-            1.0,
-            settings.acc_limit_tol,
-        )
+    data.max_acc_constraint = PolarInequalityConstraint.init(
+        data.matrices.M_a_S_u_prime_W_input,
+        c_a,
+        -float("inf"),
+        settings.acc_max,
+        1.0,
+        settings.acc_limit_tol,
     )
 
     # Collision constraints
@@ -133,7 +131,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
                 data.matrices.M_p_S_x @ x_0 - data.previous_trajectory.pos[i].flatten()
             )
             data.constraints.append(
-                PolarInequalityConstraint(
+                OOPPolarInequalityConstraint(
                     G_c, c_c, 1.0, float("inf"), settings.bf_gamma, settings.collision_tol
                 )
             )
@@ -180,6 +178,12 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
     if settings.input_continuity_constraints:
         quad_constraint_terms += EqualityConstraint.quadratic_term(data.input_continuity_constraint)
         linear_constraint_terms += EqualityConstraint.linear_term(data.input_continuity_constraint)
+    quad_constraint_terms += InequalityConstraint.quadratic_term(data.max_pos_constraint)
+    linear_constraint_terms += InequalityConstraint.linear_term(data.max_pos_constraint)
+    quad_constraint_terms += PolarInequalityConstraint.quadratic_term(data.max_vel_constraint)
+    linear_constraint_terms += PolarInequalityConstraint.linear_term(data.max_vel_constraint)
+    quad_constraint_terms += PolarInequalityConstraint.quadratic_term(data.max_acc_constraint)
+    linear_constraint_terms += PolarInequalityConstraint.linear_term(data.max_acc_constraint)
     for constraint in data.constraints:
         quad_constraint_terms += constraint.get_quadratic_term()
         linear_constraint_terms += constraint.get_linear_term()
@@ -196,6 +200,9 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
         zeta = np.linalg.solve(Q, -q)
 
         # Update constraints
+        InequalityConstraint.update(data.max_pos_constraint, zeta)
+        PolarInequalityConstraint.update(data.max_vel_constraint, zeta)
+        PolarInequalityConstraint.update(data.max_acc_constraint, zeta)
         for c in data.constraints:
             c.update(zeta)
 
@@ -215,6 +222,9 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
             linear_constraint_terms += EqualityConstraint.linear_term(
                 data.input_continuity_constraint
             )
+        linear_constraint_terms += InequalityConstraint.linear_term(data.max_pos_constraint)
+        linear_constraint_terms += PolarInequalityConstraint.linear_term(data.max_vel_constraint)
+        linear_constraint_terms += PolarInequalityConstraint.linear_term(data.max_acc_constraint)
         for constraint in data.constraints:
             linear_constraint_terms += constraint.get_linear_term()
 
@@ -250,8 +260,13 @@ def reset_cost_matrices(data: SolverData) -> SolverData:
 def reset_constraints(data: SolverData) -> SolverData:
     """Reset constraints to initial values"""
     data.constraints.clear()
-    data.eq_pos_cnstr_G = None
-    data.eq_pos_cnstr_h = None
+    data.pos_constraint = None
+    data.vel_constraint = None
+    data.acc_constraint = None
+    data.input_continuity_constraint = None
+    data.max_pos_constraint = None
+    data.max_vel_constraint = None
+    data.max_acc_constraint = None
     return data
 
 
@@ -275,6 +290,12 @@ def constraints_satisfied(zeta: NDArray, data: SolverData) -> bool:
     if data.input_continuity_constraint is not None and not EqualityConstraint.satisfied(
         data.input_continuity_constraint, zeta
     ):
+        return False
+    if not InequalityConstraint.satisfied(data.max_pos_constraint, zeta):
+        return False
+    if not PolarInequalityConstraint.satisfied(data.max_vel_constraint, zeta):
+        return False
+    if not PolarInequalityConstraint.satisfied(data.max_acc_constraint, zeta):
         return False
     return True
 

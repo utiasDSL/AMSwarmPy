@@ -53,31 +53,6 @@ class Constraint(Protocol):
         ...
 
 
-class EqualityConstraint:
-    """Handles equality constraints of the form Gx = h."""
-
-    def __init__(self, G: np.ndarray, h: np.ndarray, tolerance: float = 1e-2):
-        self.G = G
-        self.h = h
-        self.G_T = G.T
-        self.G_T_G = G.T @ G
-        self.G_T_h = G.T @ h
-        self.tolerance = tolerance
-
-    def get_quadratic_term(self) -> np.ndarray:
-        return self.G_T_G
-
-    def get_linear_term(self) -> np.ndarray:
-        return -self.G_T_h
-
-    def update(self, x: np.ndarray) -> None: ...
-
-    def is_satisfied(self, x: np.ndarray) -> bool:
-        return np.max(np.abs(self.G @ x - self.h)) <= self.tolerance
-
-    def reset(self): ...
-
-
 class InequalityConstraint:
     """Handles inequality constraints of the form Gx <= h."""
 
@@ -109,18 +84,23 @@ class InequalityConstraint:
 class PolarInequalityConstraint:
     """Manages polar inequality constraints of a specialized form.
 
-    This class is designed to handle constraints defined by polar coordinates that conform to the formula:
-    Gx + c = h(alpha, beta, d), with the boundary condition lwr_bound <= d <= upr_bound.
+    This class is designed to handle constraints defined by polar coordinates that conform to the
+    formula
+    Gx + c = h(alpha, beta, d)
 
-    Here, 'alpha', 'beta', and 'd' are vectors with a length of K+1, where 'd' represents the distance from the origin,
-    'alpha' the azimuthal angle, and 'beta' the polar angle. The vector 'h' has a length of 3(K+1), where each set of three elements
-    in 'h()' represents a point in 3D space expressed as:
+    with the boundary condition lwr_bound <= d <= upr_bound.
+
+    Here, 'alpha', 'beta', and 'd' are vectors with a length of K+1, where 'd' represents the
+    distance from the origin, 'alpha' the azimuthal angle, and 'beta' the polar angle. The vector
+    'h' has a length of 3(K+1), where each set of three elements in 'h()' represents a point in 3D
+    space expressed as:
 
     d[k] * [cos(alpha[k]) * sin(beta[k]), sin(alpha[k]) * sin(beta[k]), cos(beta[k])]^T
 
-    This represents a unit vector defined by angles 'alpha[k]' and 'beta[k]', scaled by 'd[k]', where 'k' is an index running from 0 to K.
-    The index range from 0 to K can be interpreted as discrete time steps, allowing this constraint to serve as a Barrier Function (BF)
-    constraint to manage the rate at which a constraint boundary is approached over successive time steps.
+    This represents a unit vector defined by angles 'alpha[k]' and 'beta[k]', scaled by 'd[k]',
+    where 'k' is an index running from 0 to K. The index range from 0 to K can be interpreted as
+    discrete time steps, allowing this constraint to serve as a Barrier Function (BF) constraint to
+    manage the rate at which a constraint boundary is approached over successive time steps.
     """
 
     def __init__(

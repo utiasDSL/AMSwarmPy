@@ -44,6 +44,7 @@ class SolverData:
     vel_constraint: EqualityConstraint | None = None
     acc_constraint: EqualityConstraint | None = None
     input_continuity_constraint: EqualityConstraint | None = None
+    pos_bound_constraint: InequalityConstraint | None = None
 
     @staticmethod
     def init(
@@ -123,13 +124,15 @@ class InequalityConstraint:
     h: Array
     _G_T_G: Array
     _G_T_h: Array
+    slack: Array
     tol: float = 1e-2
 
     @staticmethod
     def init(G: Array, h: Array, tol: float = 1e-2) -> InequalityConstraint:
         G_T_G = G.T @ G
         G_T_h = G.T @ h
-        return InequalityConstraint(G, h, G_T_G, G_T_h, tol)
+        slack = np.zeros_like(h)
+        return InequalityConstraint(G, h, G_T_G, G_T_h, slack, tol)
 
     @staticmethod
     def quadratic_term(cnstr: InequalityConstraint) -> Array:
@@ -140,11 +143,136 @@ class InequalityConstraint:
         return -cnstr._G_T_h + cnstr.G.T @ cnstr.slack
 
     @staticmethod
-    def update(self, x: Array) -> None:
-        self.slack = np.maximum(0, -self.G @ x + self.h)
+    def update(cnstr: InequalityConstraint, x: Array) -> None:
+        cnstr.slack = np.maximum(0, -cnstr.G @ x + cnstr.h)
 
-    def is_satisfied(self, x: Array) -> bool:
-        return np.max(self.G @ x - self.h) < self.tol
+    @staticmethod
+    def satisfied(cnstr: InequalityConstraint, zeta: Array) -> bool:
+        return np.max(cnstr.G @ zeta - cnstr.h) < cnstr.tol
+
+
+@dataclass
+class PolarInequalityConstraint:
+    """Manages polar inequality constraints of a specialized form.
+
+    This class is designed to handle constraints defined by polar coordinates that conform to the
+    formula
+    Gx + c = h(alpha, beta, d)
+
+    with the boundary condition lwr_bound <= d <= upr_bound.
+
+    Here, 'alpha', 'beta', and 'd' are vectors with a length of K+1, where 'd' represents the
+    distance from the origin, 'alpha' the azimuthal angle, and 'beta' the polar angle. The vector
+    'h' has a length of 3(K+1), where each set of three elements in 'h()' represents a point in 3D
+    space expressed as:
+
+    d[k] * [cos(alpha[k]) * sin(beta[k]), sin(alpha[k]) * sin(beta[k]), cos(beta[k])]^T
+
+    This represents a unit vector defined by angles 'alpha[k]' and 'beta[k]', scaled by 'd[k]',
+    where 'k' is an index running from 0 to K. The index range from 0 to K can be interpreted as
+    discrete time steps, allowing this constraint to serve as a Barrier Function (BF) constraint to
+    manage the rate at which a constraint boundary is approached over successive time steps.
+    """
+
+    G: Array
+    c: Array
+    h: Array
+    _G_T_G: Array
+    lwr_bound: float
+    upr_bound: float
+    bf_gamma: float
+    tolerance: float
+
+    @staticmethod
+    def init(
+        G: np.ndarray,
+        c: np.ndarray,
+        lwr_bound: float,
+        upr_bound: float,
+        bf_gamma: float = 1.0,
+        tolerance: float = 1e-2,
+    ) -> PolarInequalityConstraint:
+        return PolarInequalityConstraint(G, c, -c, lwr_bound, upr_bound, bf_gamma, tolerance)
+
+    @staticmethod
+    def quadratic_term(cnstr: PolarInequalityConstraint) -> Array:
+        return cnstr._G_T_G
+
+    @staticmethod
+    def linear_term(cnstr: PolarInequalityConstraint) -> Array:
+        return -cnstr._G_T @ cnstr.h
+
+    @staticmethod
+    def update(cnstr: PolarInequalityConstraint, x: Array) -> PolarInequalityConstraint:
+        if cnstr.G.shape[1] != x.shape[0]:
+            raise ValueError("G and x are not compatible sizes")
+        assert not (cnstr.apply_upr_bound and cnstr.apply_lwr_bound)
+
+        if cnstr.bf_gamma == 1.0:
+            cnstr.h = cnstr._fast_h(x) - cnstr.c
+            return cnstr
+
+        h = cnstr.G @ x + cnstr.c
+        prev_norm = 0
+        h = h.reshape(-1, 3)
+        h_norm = np.linalg.norm(h, axis=-1)
+
+        prev_norm = cnstr.upr_bound if cnstr.apply_upr_bound else cnstr.lwr_bound
+
+        for i in range(0, h.shape[0]):
+            # Calculate norm of current time segment
+            segment_norm = h_norm[i]
+
+            # Apply upper bound if not infinite
+            if cnstr.apply_upr_bound:
+                bound = cnstr.bf_gamma * cnstr.upr_bound + (1.0 - cnstr.bf_gamma) * prev_norm
+
+                if segment_norm > bound:
+                    h[i] *= bound / segment_norm
+                    segment_norm = bound
+
+            # Apply lower bound if not infinite
+            if cnstr.apply_lwr_bound:
+                bound = cnstr.bf_gamma * cnstr.lwr_bound + (1.0 - cnstr.bf_gamma) * prev_norm
+                assert cnstr.bf_gamma == 1.0
+
+                if segment_norm < bound:
+                    h[i] *= bound / segment_norm
+                    segment_norm = bound
+
+            # Track norm for next iteration
+            prev_norm = segment_norm
+
+        h = h.flatten()
+        cnstr.h = h - cnstr.c
+        return cnstr
+
+    @staticmethod
+    def _fast_h(cnstr: PolarInequalityConstraint, x: Array) -> Array:
+        assert cnstr.bf_gamma == 1.0, "Fast-path barrier function gamma must be zero"
+
+        h = cnstr.G @ x + cnstr.c
+        h = h.reshape(-1, 3)
+        h_norm = np.linalg.norm(h, axis=-1)
+
+        if cnstr.apply_upr_bound:
+            mask = h_norm > cnstr.upr_bound
+            bound = cnstr.upr_bound
+        elif cnstr.apply_lwr_bound:
+            mask = h_norm < cnstr.lwr_bound
+            bound = cnstr.lwr_bound
+        else:
+            raise ValueError("Must be either upper or lower")
+        h[mask] = h[mask] / h_norm[mask][:, None] * bound
+        return h.flatten()
+
+    @staticmethod
+    def satisfied(cnstr: PolarInequalityConstraint, zeta: Array) -> bool:
+        return np.max(np.abs(cnstr.G @ zeta - cnstr.h)) < cnstr.tolerance
+
+    @staticmethod
+    def reset(cnstr: PolarInequalityConstraint) -> None:
+        cnstr.h = -cnstr.c
 
 
 @dataclass

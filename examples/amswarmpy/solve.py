@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from functools import partial
+
+import jax
+import jax.numpy as jp
 import numpy as np
+from jax import Array
 from numpy.typing import NDArray
 
-from .constraint import PolarInequalityConstraint as OOPPolarInequalityConstraint
-from .data import EqualityConstraint, InequalityConstraint, SolverData, PolarInequalityConstraint
+from .constraint import EqualityConstraint, InequalityConstraint, PolarInequalityConstraint
+from .data import SolverData
 from .settings import SolverSettings
 
 
@@ -14,15 +19,14 @@ def solve_swarm(
     n_drones = len(states)
     pos = data.previous_trajectory.pos
     col = 1.0 / settings.collision_envelope
-    data.distance_matrix = np.linalg.norm((pos[None, ...] - pos[:, None, ...]) * col, axis=-1)
-    data.x_0 = states
-    data.current_time = t
+    distances = np.linalg.norm((pos[None, ...] - pos[:, None, ...]) * col, axis=-1)
+    data = data.replace(distance_matrix=distances, x_0=states, current_time=t)
 
     # Solve for each drone
     is_success = np.zeros(n_drones, dtype=bool)
     iters = np.zeros(n_drones)
     for i in range(n_drones):
-        data.rank = i
+        data = data.replace(rank=i)
         success, num_iters, data = solve_drone(data, settings)
         is_success[i] = success
         iters[i] = num_iters
@@ -40,6 +44,11 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     assert data.zeta is not None, "Zeta must be initialized before adding constraints"
 
     mask, steps = filter_horizon(data.waypoints["time"][:, data.rank], data.current_time, K, freq)
+    if np.sum(mask) < 1:
+        raise RuntimeError(
+            "Error: no waypoints within current horizon. Increase horizon or add waypoints."
+        )
+    steps = steps[mask]
     # Separate and reshape waypoints into position, velocity, and acceleration vectors
     des_pos = data.waypoints["pos"][:, data.rank][mask].flatten()
     des_vel = data.waypoints["vel"][:, data.rank][mask].flatten()
@@ -61,7 +70,9 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     data.quad_cost[data.rank] += 2 * settings.pos_weight * G_wp.T @ G_wp
     data.linear_cost[data.rank] += -2 * settings.pos_weight * G_wp.T @ h_wp
     if settings.pos_constraints:
-        data.pos_constraint = EqualityConstraint.init(G_wp, h_wp, settings.waypoints_pos_tol)
+        data = data.replace(
+            pos_constraint=EqualityConstraint.init(G_wp, h_wp, settings.waypoints_pos_tol)
+        )
 
     # Waypoint velocity cost and/or equality constraint
     G_wv = data.matrices.M_v_S_u_W_input[wp_idx]
@@ -86,34 +97,40 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     h_u = np.concatenate([u_0, u_dot_0, u_ddot_0])
     data.linear_cost[data.rank] += -2 * settings.input_continuity_weight * data.matrices.G_u.T @ h_u
     if settings.input_continuity_constraints:
-        data.input_continuity_constraint = EqualityConstraint.init(
-            data.matrices.G_u, h_u, settings.input_continuity_tol
+        data = data.replace(
+            input_continuity_constraint=EqualityConstraint.init(
+                data.matrices.G_u, h_u, settings.input_continuity_tol
+            )
         )
 
     # Position constraint
     upper = np.tile(settings.pos_max, K + 1) - data.matrices.M_p_S_x @ x_0
     lower = -np.tile(settings.pos_min, K + 1) + data.matrices.M_p_S_x @ x_0
     h_p = np.concatenate([upper, lower])
-    data.max_pos_constraint = InequalityConstraint.init(
-        data.matrices.G_p, h_p, settings.pos_limit_tol
+    data = data.replace(
+        max_pos_constraint=InequalityConstraint.init(data.matrices.G_p, h_p, settings.pos_limit_tol)
     )
 
     # Velocity constraint
     c_v = data.matrices.M_v_S_x @ x_0
-    data.max_vel_constraint = PolarInequalityConstraint.init(
-        data.matrices.M_v_S_u_W_input,
-        c_v,
-        upr_bound=settings.vel_max,
-        tol=settings.vel_limit_tol,
+    data = data.replace(
+        max_vel_constraint=PolarInequalityConstraint.init(
+            data.matrices.M_v_S_u_W_input,
+            c_v,
+            upr_bound=settings.vel_max,
+            tol=settings.vel_limit_tol,
+        )
     )
 
     # Acceleration constraint
     c_a = data.matrices.M_a_S_x_prime @ x_0
-    data.max_acc_constraint = PolarInequalityConstraint.init(
-        data.matrices.M_a_S_u_prime_W_input,
-        c_a,
-        upr_bound=settings.acc_max,
-        tol=settings.acc_limit_tol,
+    data = data.replace(
+        max_acc_constraint=PolarInequalityConstraint.init(
+            data.matrices.M_a_S_u_prime_W_input,
+            c_a,
+            upr_bound=settings.acc_max,
+            tol=settings.acc_limit_tol,
+        )
     )
 
     # Collision constraints
@@ -127,9 +144,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
                 data.matrices.M_p_S_x @ x_0 - data.previous_trajectory.pos[i].flatten()
             )
             data.constraints.append(
-                OOPPolarInequalityConstraint(
-                    G_c, c_c, 1.0, float("inf"), settings.bf_gamma, settings.collision_tol
-                )
+                PolarInequalityConstraint.init(G_c, c_c, lwr_bound=1.0, tol=settings.collision_tol)
             )
     return data
 
@@ -159,73 +174,38 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
     bregman_mult = np.zeros(data.quad_cost[data.rank].shape[0])  # Bregman multiplier
 
     # Aggregate quadratic and linear terms from all constraints
-    quad_constraint_terms = np.zeros_like(data.quad_cost[data.rank])
-    linear_constraint_terms = np.zeros(data.linear_cost[data.rank].shape[0])
-
-    if settings.pos_constraints:
-        quad_constraint_terms += EqualityConstraint.quadratic_term(data.pos_constraint)
-        linear_constraint_terms += EqualityConstraint.linear_term(data.pos_constraint)
-    if settings.vel_constraints:
-        quad_constraint_terms += EqualityConstraint.quadratic_term(data.vel_constraint)
-        linear_constraint_terms += EqualityConstraint.linear_term(data.vel_constraint)
-    if settings.acc_constraints:
-        quad_constraint_terms += EqualityConstraint.quadratic_term(data.acc_constraint)
-        linear_constraint_terms += EqualityConstraint.linear_term(data.acc_constraint)
-    if settings.input_continuity_constraints:
-        quad_constraint_terms += EqualityConstraint.quadratic_term(data.input_continuity_constraint)
-        linear_constraint_terms += EqualityConstraint.linear_term(data.input_continuity_constraint)
-    quad_constraint_terms += InequalityConstraint.quadratic_term(data.max_pos_constraint)
-    linear_constraint_terms += InequalityConstraint.linear_term(data.max_pos_constraint)
-    quad_constraint_terms += PolarInequalityConstraint.quadratic_term(data.max_vel_constraint)
-    linear_constraint_terms += PolarInequalityConstraint.linear_term(data.max_vel_constraint)
-    quad_constraint_terms += PolarInequalityConstraint.quadratic_term(data.max_acc_constraint)
-    linear_constraint_terms += PolarInequalityConstraint.linear_term(data.max_acc_constraint)
-    for constraint in data.constraints:
-        quad_constraint_terms += constraint.get_quadratic_term()
-        linear_constraint_terms += constraint.get_linear_term()
+    Q_cnstr = quadratic_constraint_costs(data)
+    q_cnstr = linear_constraint_costs(data)
 
     # Iteratively solve until solution found or max iterations reached
     for i in range(settings.max_iters):
-        Q = data.quad_cost[data.rank] + rho * quad_constraint_terms
+        Q = data.quad_cost[data.rank] + rho * Q_cnstr
 
         # Construct linear cost matrices
-        linear_constraint_terms -= bregman_mult
-        q = data.linear_cost[data.rank] + rho * linear_constraint_terms
+        q_cnstr -= bregman_mult
+        q = data.linear_cost[data.rank] + rho * q_cnstr
 
         # Solve the QP
-        zeta = np.linalg.solve(Q, -q)
+        zeta = jp.linalg.solve(Q, -q)
 
         # Update constraints
-        InequalityConstraint.update(data.max_pos_constraint, zeta)
-        PolarInequalityConstraint.update(data.max_vel_constraint, zeta)
-        PolarInequalityConstraint.update(data.max_acc_constraint, zeta)
-        for c in data.constraints:
-            c.update(zeta)
+        data = data.replace(
+            max_pos_constraint=InequalityConstraint.update(data.max_pos_constraint, zeta),
+            max_vel_constraint=PolarInequalityConstraint.update(data.max_vel_constraint, zeta),
+            max_acc_constraint=PolarInequalityConstraint.update(data.max_acc_constraint, zeta),
+        )
+        for i, c in enumerate(data.constraints):
+            data.constraints[i] = c.update(c, zeta)
 
         if constraints_satisfied(zeta, data):
             data.zeta[data.rank] = zeta
             return True, i, data  # Exit loop, indicate success
 
         # Recalculate linear term for Bregman multiplier
-        linear_constraint_terms[...] = 0
-        if settings.pos_constraints:
-            linear_constraint_terms += EqualityConstraint.linear_term(data.pos_constraint)
-        if settings.vel_constraints:
-            linear_constraint_terms += EqualityConstraint.linear_term(data.vel_constraint)
-        if settings.acc_constraints:
-            linear_constraint_terms += EqualityConstraint.linear_term(data.acc_constraint)
-        if settings.input_continuity_constraints:
-            linear_constraint_terms += EqualityConstraint.linear_term(
-                data.input_continuity_constraint
-            )
-        linear_constraint_terms += InequalityConstraint.linear_term(data.max_pos_constraint)
-        linear_constraint_terms += PolarInequalityConstraint.linear_term(data.max_vel_constraint)
-        linear_constraint_terms += PolarInequalityConstraint.linear_term(data.max_acc_constraint)
-        for constraint in data.constraints:
-            linear_constraint_terms += constraint.get_linear_term()
+        q_cnstr = linear_constraint_costs(data)
 
         # Calculate Bregman multiplier
-        bregman_mult -= 0.5 * (quad_constraint_terms @ zeta + linear_constraint_terms)
+        bregman_mult -= 0.5 * (Q_cnstr @ zeta + q_cnstr)
 
         # Gradually increase penalty parameter
         rho *= settings.rho_init
@@ -233,6 +213,44 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
 
     data.zeta[data.rank] = zeta
     return False, i, data  # Indicate failure but still return vector
+
+
+@jax.jit
+def quadratic_constraint_costs(data: SolverData) -> Array:
+    Q_cnstr = jp.zeros_like(data.quad_cost[data.rank])
+    if data.pos_constraint is not None:
+        Q_cnstr += EqualityConstraint.quadratic_term(data.pos_constraint)
+    if data.vel_constraint is not None:
+        Q_cnstr += EqualityConstraint.quadratic_term(data.vel_constraint)
+    if data.acc_constraint is not None:
+        Q_cnstr += EqualityConstraint.quadratic_term(data.acc_constraint)
+    if data.input_continuity_constraint is not None:
+        Q_cnstr += EqualityConstraint.quadratic_term(data.input_continuity_constraint)
+    Q_cnstr += InequalityConstraint.quadratic_term(data.max_pos_constraint)
+    Q_cnstr += PolarInequalityConstraint.quadratic_term(data.max_vel_constraint)
+    Q_cnstr += PolarInequalityConstraint.quadratic_term(data.max_acc_constraint)
+    for c in data.constraints:
+        Q_cnstr += c.quadratic_term(c)
+    return Q_cnstr
+
+
+@jax.jit
+def linear_constraint_costs(data: SolverData) -> Array:
+    q_cnstr = jp.zeros_like(data.linear_cost[data.rank])
+    if data.pos_constraint is not None:
+        q_cnstr += EqualityConstraint.linear_term(data.pos_constraint)
+    if data.vel_constraint is not None:
+        q_cnstr += EqualityConstraint.linear_term(data.vel_constraint)
+    if data.acc_constraint is not None:
+        q_cnstr += EqualityConstraint.linear_term(data.acc_constraint)
+    if data.input_continuity_constraint is not None:
+        q_cnstr += EqualityConstraint.linear_term(data.input_continuity_constraint)
+    q_cnstr += InequalityConstraint.linear_term(data.max_pos_constraint)
+    q_cnstr += PolarInequalityConstraint.linear_term(data.max_vel_constraint)
+    q_cnstr += PolarInequalityConstraint.linear_term(data.max_acc_constraint)
+    for c in data.constraints:
+        q_cnstr += c.linear_term(c)
+    return q_cnstr
 
 
 def solve_drone(data: SolverData, settings: SolverSettings) -> tuple[bool, int, SolverData]:
@@ -256,66 +274,57 @@ def reset_cost_matrices(data: SolverData) -> SolverData:
 def reset_constraints(data: SolverData) -> SolverData:
     """Reset constraints to initial values"""
     data.constraints.clear()
-    data.pos_constraint = None
-    data.vel_constraint = None
-    data.acc_constraint = None
-    data.input_continuity_constraint = None
-    data.max_pos_constraint = None
-    data.max_vel_constraint = None
-    data.max_acc_constraint = None
+    data = data.replace(
+        pos_constraint=None,
+        vel_constraint=None,
+        acc_constraint=None,
+        input_continuity_constraint=None,
+        max_pos_constraint=None,
+        max_vel_constraint=None,
+        max_acc_constraint=None,
+    )
     return data
 
 
-def constraints_satisfied(zeta: NDArray, data: SolverData) -> bool:
+@jax.jit
+def constraints_satisfied(zeta: Array, data: SolverData) -> Array:
     """Check if all constraints are satisfied"""
-    for constraint in data.constraints:
-        if not constraint.is_satisfied(zeta):
-            return False
-    if data.pos_constraint is not None and not EqualityConstraint.satisfied(
-        data.pos_constraint, zeta
-    ):
-        return False
-    if data.vel_constraint is not None and not EqualityConstraint.satisfied(
-        data.vel_constraint, zeta
-    ):
-        return False
-    if data.acc_constraint is not None and not EqualityConstraint.satisfied(
-        data.acc_constraint, zeta
-    ):
-        return False
-    if data.input_continuity_constraint is not None and not EqualityConstraint.satisfied(
-        data.input_continuity_constraint, zeta
-    ):
-        return False
-    if not InequalityConstraint.satisfied(data.max_pos_constraint, zeta):
-        return False
-    if not PolarInequalityConstraint.satisfied(data.max_vel_constraint, zeta):
-        return False
-    if not PolarInequalityConstraint.satisfied(data.max_acc_constraint, zeta):
-        return False
-    return True
+    satisfied = jp.all(jp.array([c.satisfied(c, zeta) for c in data.constraints]))
+    satisfied &= InequalityConstraint.satisfied(data.max_pos_constraint, zeta)
+    satisfied &= PolarInequalityConstraint.satisfied(data.max_vel_constraint, zeta)
+    satisfied &= PolarInequalityConstraint.satisfied(data.max_acc_constraint, zeta)
+    if data.pos_constraint:
+        satisfied &= EqualityConstraint.satisfied(data.pos_constraint, zeta)
+    if data.vel_constraint:
+        satisfied &= EqualityConstraint.satisfied(data.vel_constraint, zeta)
+    if data.acc_constraint:
+        satisfied &= EqualityConstraint.satisfied(data.acc_constraint, zeta)
+    if data.input_continuity_constraint:
+        satisfied &= EqualityConstraint.satisfied(data.input_continuity_constraint, zeta)
+    return satisfied
 
 
-def filter_horizon(times: NDArray, t: float, K: int, mpc_freq: float) -> tuple[NDArray, NDArray]:
+@partial(jax.jit, static_argnums=(2, 3))
+def filter_horizon(times: Array, t: float, K: int, mpc_freq: float) -> tuple[Array, Array]:
     """Extract waypoints in current horizon.
 
     Args:
-        waypoints: Waypoints matrix
+        times: Waypoints times
         t: Current time
         K: Horizon length
         mpc_freq: MPC frequency
 
     Returns:
-        Filtered waypoints matrix containing only waypoints within current horizon
+        A mask of waypoints within current horizon and the rounded times for all waypoints
     """
-    assert isinstance(times, np.ndarray), "Waypoints must be a numpy array"
+    assert isinstance(times, Array), f"Waypoints must be an Array, is {type(times)}"
     assert times.ndim == 1, "Waypoints must be a 2D array"
     # Round times to nearest discrete time step relative to current time
-    rounded_times = np.asarray(np.round((times - t) * mpc_freq), dtype=int)
+    rounded_times = jp.asarray(jp.round((times - t) * mpc_freq), dtype=int)
     # Find time steps with waypoints within current horizon
-    in_horizon = np.where((rounded_times > 0) & (rounded_times <= K))[0]
+    in_horizon = (rounded_times > 0) & (rounded_times <= K)
     if len(in_horizon) == 0:
         raise RuntimeError(
             "Error: no waypoints within current horizon. Increase horizon or add waypoints."
         )
-    return in_horizon, rounded_times[in_horizon]
+    return in_horizon, rounded_times

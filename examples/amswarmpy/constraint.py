@@ -1,86 +1,74 @@
-from typing import Protocol
+from __future__ import annotations
 
+import jax
+import jax.numpy as jp
 import numpy as np
-from numpy.typing import NDArray
+from flax.struct import dataclass
+from jax import Array
 
 
-class Constraint(Protocol):
-    """Protocol defining the interface for constraints.
+@dataclass
+class EqualityConstraint:
+    G: Array
+    h: Array
+    _G_T_G: Array
+    _G_T_h: Array
+    tol: Array
 
-    Defines the interface for constraints and provides common functionality
-    for derived constraint classes.
-    """
+    @staticmethod
+    def init(G: Array, h: Array, tol: float = 1e-2) -> EqualityConstraint:
+        G_T_G = G.T @ G
+        G_T_h = G.T @ h
+        return EqualityConstraint(G, h, G_T_G, G_T_h, jp.array(tol))
 
-    def get_quadratic_term(self) -> np.ndarray:
-        """Retrieves the quadratic term of the constraint-as-penalty.
+    @staticmethod
+    def quadratic_term(cnstr: EqualityConstraint) -> Array:
+        return cnstr._G_T_G
 
-        All constraints can be reformulated as quadratic penalties ||Ax - b||^2
-        in the cost function instead of hard constraints. This penalty can be
-        expanded into a quadratic term of the form x^T*Q*x, a linear term of the
-        form c^T * x, and a constant term. This function returns the sparse
-        matrix Q representing the quadratic term.
-        """
-        ...
+    @staticmethod
+    def linear_term(cnstr: EqualityConstraint) -> Array:
+        return -cnstr._G_T_h
 
-    def get_linear_term(self) -> np.ndarray:
-        """Retrieves the linear term of the constraint-as-penalty.
-
-        All constraints can be formulated as quadratic penalties ||Gx - h||^2
-        in the cost function instead of hard constraints. This penalty can be
-        expanded into a quadratic term of the form x^T*Q*x, a linear term of the
-        form c^T * x, and a constant term. This function returns the vector c
-        representing the linear term.
-        """
-        ...
-
-    def get_bregman_update(self, x: np.ndarray) -> np.ndarray:
-        """Calculates and returns the Bregman "multiplier" update based on the current point.
-
-        See thesis document for more information on Bregman iteration.
-        """
-        ...
-
-    def update(self, x: np.ndarray) -> None:
-        """Updates the internal state of the constraint if necessary (e.g. slack variables)."""
-        ...
-
-    def is_satisfied(self, x: np.ndarray) -> bool:
-        """Checks if the constraint is satisfied at the given point."""
-        ...
-
-    def reset(self) -> None:
-        """Resets the internal state of the constraint to its initial state."""
-        ...
+    @staticmethod
+    @jax.jit
+    def satisfied(cnstr: EqualityConstraint, zeta: Array) -> Array:
+        return jp.max(jp.abs(cnstr.G @ zeta - cnstr.h)) <= cnstr.tol
 
 
+@dataclass
 class InequalityConstraint:
-    """Handles inequality constraints of the form Gx <= h."""
+    G: Array
+    h: Array
+    _G_T_G: Array
+    _G_T_h: Array
+    slack: Array
+    tol: float = 1e-2
 
-    def __init__(self, G: np.ndarray, h: np.ndarray, tolerance: float = 1e-2):
-        self.G = G
-        self.h = h
-        self.G_T = G.T
-        self.G_T_G = G.T @ G
-        self.G_T_h = G.T @ h
-        self.slack = np.zeros_like(h)
-        self.tolerance = tolerance
+    @staticmethod
+    def init(G: Array, h: Array, tol: float = 1e-2) -> InequalityConstraint:
+        G_T_G = G.T @ G
+        G_T_h = G.T @ h
+        slack = np.zeros_like(h)
+        return InequalityConstraint(G, h, G_T_G, G_T_h, slack, tol)
 
-    def get_quadratic_term(self) -> np.ndarray:
-        return self.G_T_G
+    @staticmethod
+    def quadratic_term(cnstr: InequalityConstraint) -> Array:
+        return cnstr._G_T_G
 
-    def get_linear_term(self) -> np.ndarray:
-        return -self.G_T_h + self.G_T @ self.slack
+    @staticmethod
+    def linear_term(cnstr: InequalityConstraint) -> Array:
+        return -cnstr._G_T_h + cnstr.G.T @ cnstr.slack
 
-    def update(self, x: np.ndarray) -> None:
-        self.slack = np.maximum(0, -self.G @ x + self.h)
+    @staticmethod
+    def update(cnstr: InequalityConstraint, x: Array) -> InequalityConstraint:
+        return cnstr.replace(slack=jp.maximum(0, -cnstr.G @ x + cnstr.h))
 
-    def is_satisfied(self, x: np.ndarray) -> bool:
-        return np.max(self.G @ x - self.h) < self.tolerance
-
-    def reset(self):
-        self.slack = np.zeros_like(self.h)
+    @staticmethod
+    def satisfied(cnstr: InequalityConstraint, zeta: Array) -> bool:
+        return jp.max(cnstr.G @ zeta - cnstr.h) < cnstr.tol
 
 
+@dataclass
 class PolarInequalityConstraint:
     """Manages polar inequality constraints of a specialized form.
 
@@ -88,7 +76,12 @@ class PolarInequalityConstraint:
     formula
     Gx + c = h(alpha, beta, d)
 
+
     with the boundary condition lwr_bound <= d <= upr_bound.
+
+    Note:
+        bf_gamma is fixed to 1.0 in our implementation which enables a faster computation of the
+        update.
 
     Here, 'alpha', 'beta', and 'd' are vectors with a length of K+1, where 'd' represents the
     distance from the origin, 'alpha' the azimuthal angle, and 'beta' the polar angle. The vector
@@ -103,96 +96,62 @@ class PolarInequalityConstraint:
     manage the rate at which a constraint boundary is approached over successive time steps.
     """
 
-    def __init__(
-        self,
+    G: Array
+    c: Array
+    h: Array
+    _G_T_G: Array
+    lwr_bound: float | None
+    upr_bound: float | None
+    tol: float
+
+    @staticmethod
+    def init(
         G: np.ndarray,
         c: np.ndarray,
-        lwr_bound: float,
-        upr_bound: float,
-        bf_gamma: float = 1.0,
-        tolerance: float = 1e-2,
-    ):
-        self.G = G
-        self.G_T = G.T
-        self.G_T_G = G.T @ G
-        self.c = c
-        self.h = -c
-        self.lwr_bound = lwr_bound
-        self.upr_bound = upr_bound
-        self.apply_upr_bound = not np.isinf(upr_bound)
-        self.apply_lwr_bound = not np.isinf(lwr_bound)
-        self.bf_gamma = bf_gamma
-        self.tolerance = tolerance
+        lwr_bound: float | None = None,
+        upr_bound: float | None = None,
+        tol: float = 1e-2,
+    ) -> PolarInequalityConstraint:
+        return PolarInequalityConstraint(G, c, -c, G.T @ G, lwr_bound, upr_bound, tol)
 
-    def get_quadratic_term(self) -> np.ndarray:
-        return self.G_T_G
+    @staticmethod
+    @jax.jit
+    def quadratic_term(cnstr: PolarInequalityConstraint) -> Array:
+        return cnstr._G_T_G
 
-    def get_linear_term(self) -> np.ndarray:
-        return -self.G_T @ self.h
+    @staticmethod
+    @jax.jit
+    def linear_term(cnstr: PolarInequalityConstraint) -> Array:
+        return -cnstr.G.T @ cnstr.h
 
-    def update(self, x: np.ndarray) -> None:
-        if self.G.shape[1] != x.shape[0]:
+    @staticmethod
+    @jax.jit
+    def update(cnstr: PolarInequalityConstraint, x: Array) -> PolarInequalityConstraint:
+        if cnstr.G.shape[1] != x.shape[0]:
             raise ValueError("G and x are not compatible sizes")
-        assert not (self.apply_upr_bound and self.apply_lwr_bound)
+        assert not (cnstr.upr_bound is not None and cnstr.lwr_bound is not None)
 
-        if self.bf_gamma == 1.0:
-            self.h = self._fast_h(x) - self.c
-            return
-
-        h = self.G @ x + self.c
-        prev_norm = 0
+        h = cnstr.G @ x + cnstr.c
         h = h.reshape(-1, 3)
-        h_norm = np.linalg.norm(h, axis=-1)
+        h_norm = jp.linalg.norm(h, axis=-1, keepdims=True)
 
-        prev_norm = self.upr_bound if self.apply_upr_bound else self.lwr_bound
-
-        for i in range(0, h.shape[0]):
-            # Calculate norm of current time segment
-            segment_norm = h_norm[i]
-
-            # Apply upper bound if not infinite
-            if self.apply_upr_bound:
-                bound = self.bf_gamma * self.upr_bound + (1.0 - self.bf_gamma) * prev_norm
-
-                if segment_norm > bound:
-                    h[i] *= bound / segment_norm
-                    segment_norm = bound
-
-            # Apply lower bound if not infinite
-            if self.apply_lwr_bound:
-                bound = self.bf_gamma * self.lwr_bound + (1.0 - self.bf_gamma) * prev_norm
-                assert self.bf_gamma == 1.0
-
-                if segment_norm < bound:
-                    h[i] *= bound / segment_norm
-                    segment_norm = bound
-
-            # Track norm for next iteration
-            prev_norm = segment_norm
-
-        h = h.flatten()
-        self.h = h - self.c
-
-    def _fast_h(self, x: NDArray):
-        assert self.bf_gamma == 1.0, "Fast-path barrier function gamma must be zero"
-
-        h = self.G @ x + self.c
-        h = h.reshape(-1, 3)
-        h_norm = np.linalg.norm(h, axis=-1)
-
-        if self.apply_upr_bound:
-            mask = h_norm > self.upr_bound
-            bound = self.upr_bound
-        elif self.apply_lwr_bound:
-            mask = h_norm < self.lwr_bound
-            bound = self.lwr_bound
+        if cnstr.upr_bound is not None:
+            mask = h_norm > cnstr.upr_bound
+            bound = cnstr.upr_bound
+        elif cnstr.lwr_bound is not None:
+            mask = h_norm < cnstr.lwr_bound
+            bound = cnstr.lwr_bound
         else:
             raise ValueError("Must be either upper or lower")
-        h[mask] = h[mask] / h_norm[mask][:, None] * bound
-        return h.flatten()
+        h = jp.where(mask, h / h_norm * bound, h)
+        cnstr = cnstr.replace(h=h.flatten() - cnstr.c)
+        return cnstr
 
-    def is_satisfied(self, x: np.ndarray) -> bool:
-        return np.max(np.abs(self.G @ x - self.h)) < self.tolerance
+    @staticmethod
+    @jax.jit
+    def satisfied(cnstr: PolarInequalityConstraint, zeta: Array) -> Array:
+        return jp.max(jp.abs(cnstr.G @ zeta - cnstr.h)) < cnstr.tol
 
-    def reset(self):
-        self.h = -self.c
+    @staticmethod
+    def reset(cnstr: PolarInequalityConstraint) -> None:
+        cnstr.h = -cnstr.c

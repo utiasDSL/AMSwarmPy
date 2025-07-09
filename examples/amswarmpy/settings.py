@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from flax.struct import dataclass
+from flax.struct import dataclass, field
 from numpy.typing import NDArray
 
 
 @dataclass
 class SolverSettings:
     # AMSwarm solver iteration settings
-    max_iters: int  # Maximum number of iterations
+    max_iters: int = field(pytree_node=False)  # Maximum number of iterations
     rho_init: float  # Initial value of rho
     rho_max: float  # Maximum allowable value of rho
 

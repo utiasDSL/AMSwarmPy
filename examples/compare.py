@@ -223,7 +223,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
             print("Warning: Solve failed")
 
         solver_data.trajectory.step()
-        solver_data.previous_trajectory = deepcopy(solver_data.trajectory)
+        solver_data = solver_data.replace(previous_trajectory=deepcopy(solver_data.trajectory))
         control = solver_data.trajectory.pos[:, 1]
         control = np.concat([control, np.zeros((control.shape[0], 10))], axis=-1)
         control = control[None, ...]

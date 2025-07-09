@@ -103,10 +103,8 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     data.max_vel_constraint = PolarInequalityConstraint.init(
         data.matrices.M_v_S_u_W_input,
         c_v,
-        -float("inf"),
-        settings.vel_max,
-        1.0,
-        settings.vel_limit_tol,
+        upr_bound=settings.vel_max,
+        tol=settings.vel_limit_tol,
     )
 
     # Acceleration constraint
@@ -114,10 +112,8 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     data.max_acc_constraint = PolarInequalityConstraint.init(
         data.matrices.M_a_S_u_prime_W_input,
         c_a,
-        -float("inf"),
-        settings.acc_max,
-        1.0,
-        settings.acc_limit_tol,
+        upr_bound=settings.acc_max,
+        tol=settings.acc_limit_tol,
     )
 
     # Collision constraints

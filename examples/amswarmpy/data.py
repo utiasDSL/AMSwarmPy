@@ -178,21 +178,21 @@ class PolarInequalityConstraint:
     c: Array
     h: Array
     _G_T_G: Array
-    lwr_bound: float
-    upr_bound: float
+    lwr_bound: float | None
+    upr_bound: float | None
     bf_gamma: float
-    tolerance: float
+    tol: float
 
     @staticmethod
     def init(
         G: np.ndarray,
         c: np.ndarray,
-        lwr_bound: float,
-        upr_bound: float,
+        lwr_bound: float | None = None,
+        upr_bound: float | None = None,
         bf_gamma: float = 1.0,
-        tolerance: float = 1e-2,
+        tol: float = 1e-2,
     ) -> PolarInequalityConstraint:
-        return PolarInequalityConstraint(G, c, -c, lwr_bound, upr_bound, bf_gamma, tolerance)
+        return PolarInequalityConstraint(G, c, -c, G.T @ G, lwr_bound, upr_bound, bf_gamma, tol)
 
     @staticmethod
     def quadratic_term(cnstr: PolarInequalityConstraint) -> Array:
@@ -200,16 +200,16 @@ class PolarInequalityConstraint:
 
     @staticmethod
     def linear_term(cnstr: PolarInequalityConstraint) -> Array:
-        return -cnstr._G_T @ cnstr.h
+        return -cnstr.G.T @ cnstr.h
 
     @staticmethod
     def update(cnstr: PolarInequalityConstraint, x: Array) -> PolarInequalityConstraint:
         if cnstr.G.shape[1] != x.shape[0]:
             raise ValueError("G and x are not compatible sizes")
-        assert not (cnstr.apply_upr_bound and cnstr.apply_lwr_bound)
+        assert not (cnstr.upr_bound is not None and cnstr.lwr_bound is not None)
 
         if cnstr.bf_gamma == 1.0:
-            cnstr.h = cnstr._fast_h(x) - cnstr.c
+            cnstr.h = cnstr._fast_h(cnstr, x) - cnstr.c
             return cnstr
 
         h = cnstr.G @ x + cnstr.c
@@ -217,14 +217,14 @@ class PolarInequalityConstraint:
         h = h.reshape(-1, 3)
         h_norm = np.linalg.norm(h, axis=-1)
 
-        prev_norm = cnstr.upr_bound if cnstr.apply_upr_bound else cnstr.lwr_bound
+        prev_norm = cnstr.upr_bound if cnstr.upr_bound is not None else cnstr.lwr_bound
 
         for i in range(0, h.shape[0]):
             # Calculate norm of current time segment
             segment_norm = h_norm[i]
 
             # Apply upper bound if not infinite
-            if cnstr.apply_upr_bound:
+            if cnstr.upr_bound is not None:
                 bound = cnstr.bf_gamma * cnstr.upr_bound + (1.0 - cnstr.bf_gamma) * prev_norm
 
                 if segment_norm > bound:
@@ -232,7 +232,7 @@ class PolarInequalityConstraint:
                     segment_norm = bound
 
             # Apply lower bound if not infinite
-            if cnstr.apply_lwr_bound:
+            if cnstr.lwr_bound is not None:
                 bound = cnstr.bf_gamma * cnstr.lwr_bound + (1.0 - cnstr.bf_gamma) * prev_norm
                 assert cnstr.bf_gamma == 1.0
 
@@ -255,10 +255,10 @@ class PolarInequalityConstraint:
         h = h.reshape(-1, 3)
         h_norm = np.linalg.norm(h, axis=-1)
 
-        if cnstr.apply_upr_bound:
+        if cnstr.upr_bound is not None:
             mask = h_norm > cnstr.upr_bound
             bound = cnstr.upr_bound
-        elif cnstr.apply_lwr_bound:
+        elif cnstr.lwr_bound is not None:
             mask = h_norm < cnstr.lwr_bound
             bound = cnstr.lwr_bound
         else:
@@ -268,7 +268,7 @@ class PolarInequalityConstraint:
 
     @staticmethod
     def satisfied(cnstr: PolarInequalityConstraint, zeta: Array) -> bool:
-        return np.max(np.abs(cnstr.G @ zeta - cnstr.h)) < cnstr.tolerance
+        return np.max(np.abs(cnstr.G @ zeta - cnstr.h)) < cnstr.tol
 
     @staticmethod
     def reset(cnstr: PolarInequalityConstraint) -> None:

@@ -118,34 +118,38 @@ class PolarInequalityConstraint:
 
     @staticmethod
     def init(
-        G: np.ndarray,
-        c: np.ndarray,
+        G: Array,
+        c: Array,
         lwr_bound: float | None = None,
         upr_bound: float | None = None,
         tol: float = 1e-2,
+        active: Array | None = None,
     ) -> PolarInequalityConstraint:
-        active = jp.ones(shape=G.shape[:-2], dtype=bool)
+        if active is None:
+            active = jp.ones(shape=G.shape[:-2], dtype=bool)
+        else:
+            assert active.shape == G.shape[:-2]
         return PolarInequalityConstraint(G, c, -c, G.mT @ G, lwr_bound, upr_bound, active, tol)
 
     @staticmethod
     @jax.jit
     def quadratic_term(cnstr: PolarInequalityConstraint) -> Array:
-        return cnstr._G_T_G * cnstr.active
+        return cnstr._G_T_G * cnstr.active[..., None, None]
 
     @staticmethod
     @jax.jit
     def linear_term(cnstr: PolarInequalityConstraint) -> Array:
-        return (-cnstr.G.T @ cnstr.h) * cnstr.active
+        return (-cnstr.G.mT @ cnstr.h[..., None])[..., 0] * cnstr.active[..., None]
 
     @staticmethod
     @jax.jit
     def update(cnstr: PolarInequalityConstraint, x: Array) -> PolarInequalityConstraint:
-        if cnstr.G.shape[1] != x.shape[0]:
+        if cnstr.G.shape[-1] != x.shape[-1]:
             raise ValueError("G and x are not compatible sizes")
         assert not (cnstr.upr_bound is not None and cnstr.lwr_bound is not None)
 
         h = cnstr.G @ x + cnstr.c
-        h = h.reshape(-1, 3)
+        h = h.reshape(*h.shape[:-1], -1, 3)
         h_norm = jp.linalg.norm(h, axis=-1, keepdims=True)
 
         if cnstr.upr_bound is not None:
@@ -157,7 +161,9 @@ class PolarInequalityConstraint:
         else:
             raise ValueError("Must be either upper or lower")
         h = jp.where(mask, h / h_norm * bound, h)
-        cnstr = cnstr.replace(h=jp.where(cnstr.active, h.flatten() - cnstr.c, cnstr.h))
+        cnstr = cnstr.replace(
+            h=jp.where(cnstr.active[..., None], h.reshape(*h.shape[:-2], -1) - cnstr.c, cnstr.h)
+        )
         return cnstr
 
     @staticmethod

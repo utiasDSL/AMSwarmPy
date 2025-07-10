@@ -95,6 +95,7 @@ def reset_constraints(data: SolverData) -> SolverData:
     return data
 
 
+@jax.jit
 def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     """Setup optimization problem before solving.
 
@@ -150,7 +151,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     u_0 = data.previous_trajectory.u_pos[data.rank, 0]
     u_dot_0 = data.previous_trajectory.u_vel[data.rank, 0]
     u_ddot_0 = data.previous_trajectory.u_acc[data.rank, 0]
-    h_u = np.concatenate([u_0, u_dot_0, u_ddot_0])
+    h_u = jp.concatenate([u_0, u_dot_0, u_ddot_0])
     linear_cost += -2 * settings.input_continuity_weight * data.matrices.G_u.T @ h_u
     if settings.input_continuity_constraints:
         data = data.replace(
@@ -160,9 +161,9 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
         )
 
     # Position constraint
-    upper = np.tile(settings.pos_max, settings.K + 1) - data.matrices.M_p_S_x @ x_0
-    lower = -np.tile(settings.pos_min, settings.K + 1) + data.matrices.M_p_S_x @ x_0
-    h_p = np.concatenate([upper, lower])
+    upper = jp.tile(settings.pos_max, settings.K + 1) - data.matrices.M_p_S_x @ x_0
+    lower = -jp.tile(settings.pos_min, settings.K + 1) + data.matrices.M_p_S_x @ x_0
+    h_p = jp.concatenate([upper, lower])
     data = data.replace(
         max_pos_constraint=InequalityConstraint.init(data.matrices.G_p, h_p, settings.pos_limit_tol)
     )
@@ -190,20 +191,28 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     )
 
     # Collision constraints
-    constraints = []
-    for i in range(data.n_drones):
-        if i == data.rank:
-            continue
-        if np.any(data.distance_matrix <= 1.0, axis=-1)[i, data.rank]:
-            envelope = np.tile(1 / settings.collision_envelope, settings.K + 1)
-            G_c = envelope[:, None] * data.matrices.M_p_S_u_W_input
-            c_c = envelope * (
-                data.matrices.M_p_S_x @ x_0 - data.previous_trajectory.pos[i].flatten()
-            )
-            constraints.append(
-                PolarInequalityConstraint.init(G_c, c_c, lwr_bound=1.0, tol=settings.collision_tol)
-            )
-    data = data.replace(collision_constraints=constraints)
+    n_collisions = min(settings.max_collisions, data.n_drones - 1)
+    min_dist = jp.min(data.distance_matrix[data.rank], axis=-1)
+    closest_drones = jp.argsort(min_dist)[:n_collisions]
+    G_c_batched = jp.zeros((n_collisions, 3 * (settings.K + 1), 3 * (settings.N + 1)))
+    c_c_batched = jp.zeros((n_collisions, 3 * (settings.K + 1)))
+
+    envelope = jp.tile(1 / settings.collision_envelope, settings.K + 1)
+    for i, d in enumerate(closest_drones):
+        c_c = envelope * (data.matrices.M_p_S_x @ x_0 - data.previous_trajectory.pos[d].flatten())
+        G_c_batched = G_c_batched.at[i].set(envelope[:, None] * data.matrices.M_p_S_u_W_input)
+        c_c_batched = c_c_batched.at[i].set(c_c)
+    active = jp.zeros(n_collisions, dtype=bool)
+    active = active.at[:n_collisions].set(min_dist[closest_drones] <= 1.0)
+    data = data.replace(
+        collision_constraints=PolarInequalityConstraint.init(
+            G_c_batched,
+            c_c_batched,
+            lwr_bound=1.0,
+            tol=settings.collision_tol,
+            active=active,
+        )
+    )
     data = data.replace(linear_cost=data.linear_cost.at[data.rank].set(linear_cost))
     data = data.replace(quad_cost=data.quad_cost.at[data.rank].set(quad_cost))
     return data
@@ -259,9 +268,10 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
             max_pos_constraint=InequalityConstraint.update(data.max_pos_constraint, zeta),
             max_vel_constraint=PolarInequalityConstraint.update(data.max_vel_constraint, zeta),
             max_acc_constraint=PolarInequalityConstraint.update(data.max_acc_constraint, zeta),
+            collision_constraints=PolarInequalityConstraint.update(
+                data.collision_constraints, zeta
+            ),
         )
-        for i, c in enumerate(data.collision_constraints):
-            data.collision_constraints[i] = c.update(c, zeta)
 
         if constraints_satisfied(zeta, data):
             data = data.replace(zeta=data.zeta.at[data.rank].set(zeta))
@@ -295,8 +305,7 @@ def quadratic_constraint_costs(data: SolverData) -> Array:
     Q_cnstr += InequalityConstraint.quadratic_term(data.max_pos_constraint)
     Q_cnstr += PolarInequalityConstraint.quadratic_term(data.max_vel_constraint)
     Q_cnstr += PolarInequalityConstraint.quadratic_term(data.max_acc_constraint)
-    for c in data.collision_constraints:
-        Q_cnstr += c.quadratic_term(c)
+    Q_cnstr += jp.sum(PolarInequalityConstraint.quadratic_term(data.collision_constraints), axis=0)
     return Q_cnstr
 
 
@@ -314,15 +323,14 @@ def linear_constraint_costs(data: SolverData) -> Array:
     q_cnstr += InequalityConstraint.linear_term(data.max_pos_constraint)
     q_cnstr += PolarInequalityConstraint.linear_term(data.max_vel_constraint)
     q_cnstr += PolarInequalityConstraint.linear_term(data.max_acc_constraint)
-    for c in data.collision_constraints:
-        q_cnstr += c.linear_term(c)
+    q_cnstr += jp.sum(PolarInequalityConstraint.linear_term(data.collision_constraints), axis=0)
     return q_cnstr
 
 
 @jax.jit
 def constraints_satisfied(zeta: Array, data: SolverData) -> Array:
     """Check if all constraints are satisfied"""
-    satisfied = jp.all(jp.array([c.satisfied(c, zeta) for c in data.collision_constraints]))
+    satisfied = jp.all(PolarInequalityConstraint.satisfied(data.collision_constraints, zeta))
     satisfied &= InequalityConstraint.satisfied(data.max_pos_constraint, zeta)
     satisfied &= PolarInequalityConstraint.satisfied(data.max_vel_constraint, zeta)
     satisfied &= PolarInequalityConstraint.satisfied(data.max_acc_constraint, zeta)

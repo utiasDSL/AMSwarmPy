@@ -16,6 +16,7 @@ class SolverSettings:
     vel_constraints: bool = field(pytree_node=False)
     acc_constraints: bool = field(pytree_node=False)
     input_continuity_constraints: bool = field(pytree_node=False)
+    max_collisions: int = field(pytree_node=False)
 
     # Weights
     pos_weight: float

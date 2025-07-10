@@ -12,6 +12,7 @@ SolverSettings:
   vel_constraints: false
   acc_constraints: false
   input_continuity_constraints: true
+  max_collisions: 2
 
   # Weights
   pos_weight: 70000.  # Weight of the position tracking objective in the cost

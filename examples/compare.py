@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import logging
 import time
-from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,7 +20,8 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 jax.config.update("jax_platform_name", "cpu")
-jax.config.update("jax_enable_x64", True)
+
+logger = logging.getLogger(__name__)
 
 
 np.random.seed(0)
@@ -62,7 +63,7 @@ def solve_swarm(swarm, current_time, initial_states, input_drone_results, constr
         current_time, initial_states, input_drone_results, constraint_configs
     )
     if not all(success):
-        print("Warning: Solve failed")
+        logger.warning("Solve failed")
     return drone_results
 
 
@@ -108,7 +109,6 @@ def simulate_amswarm(sim, waypoints, render=False) -> NDArray:
     ]
 
     # Initialize drones and swarm
-
     drones = [
         amswarm.Drone(
             waypoints=waypoints[key],
@@ -204,9 +204,9 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     )
 
     states = np.concat((waypoints["pos"][0], np.zeros((n_drones, 3))), axis=-1)
-    success, _, solver_data = amswarmpy.solve_swarm(states, 0, solver_data, settings)
+    success, _, solver_data = amswarmpy.solve(states, 0, solver_data, settings)
     if not all(success):
-        print("Warning: Solve failed")
+        logger.warning("Solve failed")
 
     pos, vel = waypoints["pos"][0], waypoints["vel"][0]
 
@@ -218,14 +218,14 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         t = step / settings.freq
 
         states = np.concat((pos, vel), axis=-1)
-        success, _, solver_data = amswarmpy.solve_swarm(states, t, solver_data, settings)
+        success, _, solver_data = amswarmpy.solve(states, t, solver_data, settings)
         if not all(success):
-            print("Warning: Solve failed")
+            logger.warning("Solve failed")
 
         solver_data = solver_data.replace(
-            trajectory=solver_data.trajectory.step(solver_data.trajectory)
+            trajectory=solver_data.trajectory.step(solver_data.trajectory),
         )
-        solver_data = solver_data.replace(previous_trajectory=deepcopy(solver_data.trajectory))
+        solver_data = solver_data.replace(previous_trajectory=solver_data.trajectory)
         control = solver_data.trajectory.pos[:, 1]
         control = np.concat([control, np.zeros((control.shape[0], 10))], axis=-1)
         control = control[None, ...]
@@ -280,23 +280,26 @@ def main(render: bool = False):
     sim = Sim(n_drones=5, freq=400, state_freq=80, attitude_freq=400, control="state")
     n_points = 7
     waypoints = generate_waypoints(sim.n_drones, n_points=n_points)
-    # results_amswarm = simulate_amswarm(sim, waypoints, render=render)
+    results_amswarm = simulate_amswarm(sim, waypoints, render=render)
 
     results_amswarm = None
     t1 = time.perf_counter()
-    # results_amswarm = simulate_amswarm(sim, waypoints, render=render)
+    results_amswarm = simulate_amswarm(sim, waypoints, render=render)
     t2 = time.perf_counter()
+    results_amswarmpy = simulate_amswarmpy(sim, waypoints, render=render)
     print(f"AMSwarm (cpp) time: {t2 - t1:.2f} seconds")
     tstart = time.perf_counter()
     results_amswarmpy = None
     results_amswarmpy = simulate_amswarmpy(sim, waypoints, render=render)
     tstop = time.perf_counter()
     print(f"AMSwarmPy time: {tstop - tstart:.2f} seconds")
-    # Solve time v00: 20s
     sim.close()
 
     plot_trajectories(sim, waypoints, results_amswarm, results_amswarmpy)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("jax").setLevel(logging.ERROR)
+    logger.setLevel(logging.ERROR)
     fire.Fire(main)

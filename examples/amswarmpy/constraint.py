@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jp
-import numpy as np
 from flax.struct import dataclass
 from jax import Array
 
@@ -81,30 +80,25 @@ class InequalityConstraint:
 
 @dataclass
 class PolarInequalityConstraint:
-    """Manages polar inequality constraints of a specialized form.
+    """Polar inequality constraint of a specialized form.
 
-    This class is designed to handle constraints defined by polar coordinates that conform to the
-    formula
+    The constraint is defined in polar coordinates as
     Gx + c = h(alpha, beta, d)
 
-
-    with the boundary condition lwr_bound <= d <= upr_bound.
-
-    Note:
-        bf_gamma is fixed to 1.0 in our implementation which enables a faster computation of the
-        update.
-
-    Here, 'alpha', 'beta', and 'd' are vectors with a length of K+1, where 'd' represents the
-    distance from the origin, 'alpha' the azimuthal angle, and 'beta' the polar angle. The vector
-    'h' has a length of 3(K+1), where each set of three elements in 'h()' represents a point in 3D
-    space expressed as:
+    with the boundary condition lwr_bound <= d <= upr_bound. Here, 'alpha', 'beta', and 'd' are
+    vectors with a length of K+1, where 'd' represents the distance from the origin, 'alpha' the
+    azimuthal angle, and 'beta' the polar angle. The vector 'h' has a length of 3 * (K+1), where
+    each set of three elements in 'h()' represents a point in 3D space expressed as:
 
     d[k] * [cos(alpha[k]) * sin(beta[k]), sin(alpha[k]) * sin(beta[k]), cos(beta[k])]^T
 
     This represents a unit vector defined by angles 'alpha[k]' and 'beta[k]', scaled by 'd[k]',
     where 'k' is an index running from 0 to K. The index range from 0 to K can be interpreted as
-    discrete time steps, allowing this constraint to serve as a Barrier Function (BF) constraint to
-    manage the rate at which a constraint boundary is approached over successive time steps.
+    discrete time steps, allowing this constraint to serve as a Barrier Function (BF) constraint.
+
+    Note:
+        bf_gamma is fixed to 1.0 in our implementation which enables a faster computation of the
+        update.
     """
 
     G: Array
@@ -170,7 +164,3 @@ class PolarInequalityConstraint:
     @jax.jit
     def satisfied(cnstr: PolarInequalityConstraint, zeta: Array) -> Array:
         return (jp.max(jp.abs(cnstr.G @ zeta - cnstr.h), axis=-1) <= cnstr.tol) | ~cnstr.active
-
-    @staticmethod
-    def reset(cnstr: PolarInequalityConstraint) -> PolarInequalityConstraint:
-        return cnstr.replace(h=-cnstr.c)

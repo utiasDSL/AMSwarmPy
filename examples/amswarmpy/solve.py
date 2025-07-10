@@ -4,7 +4,6 @@ from functools import partial
 
 import jax
 import jax.numpy as jp
-import numpy as np
 from jax import Array
 from numpy.typing import NDArray
 
@@ -13,31 +12,33 @@ from .data import SolverData
 from .settings import SolverSettings
 
 
-def solve_swarm(
+def solve(
     states: NDArray, t: float, data: SolverData, settings: SolverSettings
 ) -> tuple[list[bool], list[int], SolverData]:
     # The horizon is dynamically shaped based on which waypoints are in the current horizon. This is
     # therefore the only function we cannot compile with jax.jit.
     data = set_horizon(data, settings)
     # After setting the horizon, everything else is static and hence gets compiled
-    return _solve_swarm(states, t, data, settings)
+    return solve_swarm(states, t, data, settings)
 
 
-def _solve_swarm(
+@jax.jit
+def solve_swarm(
     states: NDArray, t: float, data: SolverData, settings: SolverSettings
 ) -> tuple[list[bool], list[int], SolverData]:
     distances = compute_swarm_distances(data, settings)
     # Set the initial state and current time
     data = data.replace(x_0=states, current_time=t, distance_matrix=distances)
+
     # Solve for each drone
-    is_success = np.zeros(data.n_drones, dtype=bool)
-    iters = np.zeros(data.n_drones)
-    for i in range(data.n_drones):
-        data = data.replace(rank=i)
-        success, num_iters, data = solve_drone(data, settings)
-        is_success[i] = success
-        iters[i] = num_iters
-    return is_success, iters, data
+    def solve(data: SolverData, rank: Array) -> tuple[SolverData, tuple[bool, int]]:
+        data = data.replace(rank=rank)
+        success, n_iters, data = solve_drone(data, settings)
+        return data, (success, n_iters)
+
+    # success, iters, data = jax.vmap(solve_drone, in_axes=(0, None))(data, settings)
+    data, (success, iters) = jax.lax.scan(solve, data, jp.arange(data.n_drones), data.n_drones)
+    return success, iters, data
 
 
 def set_horizon(data: SolverData, settings: SolverSettings) -> SolverData:
@@ -61,14 +62,16 @@ def compute_swarm_distances(data: SolverData, settings: SolverSettings) -> Array
     return distances
 
 
+@jax.jit
 def solve_drone(data: SolverData, settings: SolverSettings) -> tuple[bool, int, SolverData]:
     """Main solve function to be called by user."""
-    # Reset cost and clear carryover constraints from previous solves
     data = reset_cost_matrices(data)
     data = reset_constraints(data)
-    data = add_constraints(data, settings)  # Build new constraints and add to cost matrices
-    success, iters, data = am_solve(data, settings)  # Solve with AM algorithm
+    data = add_constraints(data, settings)
+    success, iters, data = am_solve(data, settings)
     data = spline2states(data, settings)
+    # Ensure constraints are None so pytree stays consistent for jax.lax.scan
+    data = reset_constraints(data)
     return success, iters, data
 
 
@@ -239,6 +242,7 @@ def spline2states(data: SolverData, settings: SolverSettings) -> SolverData:
     return data.replace(trajectory=trajectory)
 
 
+@jax.jit
 def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, SolverData]:
     """Conducts actual solving process implementing optimization algorithm.
 
@@ -246,23 +250,27 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
     """
     rho = settings.rho_init
     zeta = data.zeta[data.rank]  # Previously was zero initialized, now uses previous solution
-    bregman_mult = np.zeros(data.quad_cost[data.rank].shape[0])  # Bregman multiplier
+    bregman_mult = jp.zeros(data.quad_cost[data.rank].shape[0])  # Bregman multiplier
 
     # Aggregate quadratic and linear terms from all constraints
     Q_cnstr = quadratic_constraint_costs(data)
     q_cnstr = linear_constraint_costs(data)
 
-    # Iteratively solve until solution found or max iterations reached
-    for i in range(settings.max_iters):
+    def cond_fn(
+        val: tuple[int, Array, float, Array, Array, SolverData, SolverSettings, Array],
+    ) -> bool:
+        i, zeta, _, _, _, _, data, settings = val
+        return (i < settings.max_iters) & ~constraints_satisfied(zeta, data)
+
+    def loop_fn(
+        val: tuple[int, Array, float, Array, Array, SolverData, SolverSettings, Array],
+    ) -> tuple[int, Array, SolverData]:
+        # Unpack values
+        i, zeta, rho, bregman_mult, q_cnstr, Q_cnstr, data, settings = val
+        # Solve QP
         Q = data.quad_cost[data.rank] + rho * Q_cnstr
-
-        # Construct linear cost matrices
-        q_cnstr -= bregman_mult
-        q = data.linear_cost[data.rank] + rho * q_cnstr
-
-        # Solve the QP
+        q = data.linear_cost[data.rank] + rho * (q_cnstr - bregman_mult)
         zeta = jp.linalg.solve(Q, -q)
-
         # Update constraints
         data = data.replace(
             max_pos_constraint=InequalityConstraint.update(data.max_pos_constraint, zeta),
@@ -272,23 +280,21 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
                 data.collision_constraints, zeta
             ),
         )
-
-        if constraints_satisfied(zeta, data):
-            data = data.replace(zeta=data.zeta.at[data.rank].set(zeta))
-            return True, i, data  # Exit loop, indicate success
-
-        # Recalculate linear term for Bregman multiplier
-        q_cnstr = linear_constraint_costs(data)
-
         # Calculate Bregman multiplier
-        bregman_mult -= 0.5 * (Q_cnstr @ zeta + q_cnstr)
+        q_cnstr = linear_constraint_costs(data)
+        bregman_mult = bregman_mult - 0.5 * (Q_cnstr @ zeta + q_cnstr)
+        # Increase penalty parameter
+        rho = jp.clip(rho * settings.rho_init, max=settings.rho_max)
+        return i + 1, zeta, rho, bregman_mult, q_cnstr, Q_cnstr, data, settings
 
-        # Gradually increase penalty parameter
-        rho *= settings.rho_init
-        rho = min(rho, settings.rho_max)
-
+    # Compiled equivalent to
+    # while cond_fn(...):
+    #     loop_fn(...)
+    i, zeta, rho, bregman_mult, q_cnstr, Q_cnstr, data, settings = jax.lax.while_loop(
+        cond_fn, loop_fn, (0, zeta, rho, bregman_mult, q_cnstr, Q_cnstr, data, settings)
+    )
     data = data.replace(zeta=data.zeta.at[data.rank].set(zeta))
-    return False, i, data  # Indicate failure but still return vector
+    return i != settings.max_iters, i, data
 
 
 @jax.jit

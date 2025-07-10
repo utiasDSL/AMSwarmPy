@@ -36,7 +36,6 @@ class SolverData:
     x_0: Array  # n_drones x 6 (pos, vel)
     trajectory: Trajectory
     previous_trajectory: Trajectory
-    obstacle_positions: list[Array]  # TODO: Move to fixed-sized tensor
     distance_matrix: Array  # n_drones x n_drones
     # Constraints
     collision_constraints: PolarInequalityConstraint | None = None
@@ -89,7 +88,6 @@ class SolverData:
             x_0=x_0,
             trajectory=deepcopy(trajectory),
             previous_trajectory=trajectory,
-            obstacle_positions=[],
             distance_matrix=jp.zeros((n_drones, n_drones)),
         )
 

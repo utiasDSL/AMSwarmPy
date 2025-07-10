@@ -19,7 +19,7 @@ def solve_swarm(
     n_drones = len(states)
     pos = data.previous_trajectory.pos
     col = 1.0 / settings.collision_envelope
-    distances = np.linalg.norm((pos[None, ...] - pos[:, None, ...]) * col, axis=-1)
+    distances = jp.linalg.norm((pos[None, ...] - pos[:, None, ...]) * col, axis=-1)
     data = data.replace(distance_matrix=distances, x_0=states, current_time=t)
 
     # Solve for each drone
@@ -58,17 +58,19 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     # First possible penalized step is 1, NOT 0 (input cannot affect initial state)
     wp_idx = np.repeat(steps, 3) * 3 + np.tile(np.arange(3, dtype=int), len(steps))
 
-    # Output smoothness cost
     x_0 = data.x_0[data.rank]
-    data.linear_cost[data.rank] += data.linear_cost_smoothness_const @ x_0
+    linear_cost = data.linear_cost[data.rank]
+    quad_cost = data.quad_cost[data.rank]
+    # Output smoothness cost
+    linear_cost += data.linear_cost_smoothness_const @ x_0
 
     # --- Add constraints - see thesis document for derivations ---
     # Waypoint position cost and/or equality constraint
     G_wp = data.matrices.M_p_S_u_W_input[wp_idx]
     h_wp = des_pos - data.matrices.M_p_S_x[wp_idx] @ x_0
 
-    data.quad_cost[data.rank] += 2 * settings.pos_weight * G_wp.T @ G_wp
-    data.linear_cost[data.rank] += -2 * settings.pos_weight * G_wp.T @ h_wp
+    quad_cost += 2 * settings.pos_weight * G_wp.T @ G_wp
+    linear_cost += -2 * settings.pos_weight * G_wp.T @ h_wp
     if settings.pos_constraints:
         data = data.replace(
             pos_constraint=EqualityConstraint.init(G_wp, h_wp, settings.waypoints_pos_tol)
@@ -77,16 +79,16 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     # Waypoint velocity cost and/or equality constraint
     G_wv = data.matrices.M_v_S_u_W_input[wp_idx]
     h_wv = des_vel - data.matrices.M_v_S_x[wp_idx] @ x_0
-    data.quad_cost[data.rank] += 2 * settings.vel_weight * G_wv.T @ G_wv
-    data.linear_cost[data.rank] += -2 * settings.vel_weight * G_wv.T @ h_wv
+    quad_cost += 2 * settings.vel_weight * G_wv.T @ G_wv
+    linear_cost += -2 * settings.vel_weight * G_wv.T @ h_wv
     if settings.vel_constraints:
         data.vel_constraint = EqualityConstraint.init(G_wv, h_wv, settings.waypoints_vel_tol)
 
     # Waypoint acceleration cost and/or equality constraint
     G_wa = data.matrices.M_a_S_u_prime_W_input[wp_idx]
     h_wa = des_acc - data.matrices.M_a_S_x_prime[wp_idx] @ x_0
-    data.quad_cost[data.rank] += 2 * settings.acc_weight * G_wa.T @ G_wa
-    data.linear_cost[data.rank] += -2 * settings.acc_weight * G_wa.T @ h_wa
+    quad_cost += 2 * settings.acc_weight * G_wa.T @ G_wa
+    linear_cost += -2 * settings.acc_weight * G_wa.T @ h_wa
     if settings.acc_constraints:
         data.acc_constraint = EqualityConstraint.init(G_wa, h_wa, settings.waypoints_acc_tol)
 
@@ -95,7 +97,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     u_dot_0 = data.previous_trajectory.u_vel[data.rank, 0]
     u_ddot_0 = data.previous_trajectory.u_acc[data.rank, 0]
     h_u = np.concatenate([u_0, u_dot_0, u_ddot_0])
-    data.linear_cost[data.rank] += -2 * settings.input_continuity_weight * data.matrices.G_u.T @ h_u
+    linear_cost += -2 * settings.input_continuity_weight * data.matrices.G_u.T @ h_u
     if settings.input_continuity_constraints:
         data = data.replace(
             input_continuity_constraint=EqualityConstraint.init(
@@ -146,9 +148,12 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
             data.constraints.append(
                 PolarInequalityConstraint.init(G_c, c_c, lwr_bound=1.0, tol=settings.collision_tol)
             )
+    data = data.replace(linear_cost=data.linear_cost.at[data.rank].set(linear_cost))
+    data = data.replace(quad_cost=data.quad_cost.at[data.rank].set(quad_cost))
     return data
 
 
+@jax.jit
 def spline2states(data: SolverData, settings: SolverSettings) -> SolverData:
     """Extract position, velocity, and acceleration trajectories from solution coefficients."""
     K = settings.K
@@ -156,12 +161,17 @@ def spline2states(data: SolverData, settings: SolverSettings) -> SolverData:
     zeta = data.zeta[data.rank]
     x_0 = data.x_0[data.rank]
     pos = (data.matrices.S_x @ x_0 + data.matrices.S_u_W_input @ zeta).T.reshape((K + 1, 6))[:, :3]
+    u_pos = (data.matrices.W @ zeta).T.reshape((K, 3))
+    u_vel = (data.matrices.W_dot @ zeta).T.reshape((K, 3))
+    u_acc = (data.matrices.W_ddot @ zeta).T.reshape(K, 3)
     # Get input position, velocity and acceleration from spline coefficients
-    data.trajectory.pos[data.rank] = pos
-    data.trajectory.u_pos[data.rank] = (data.matrices.W @ zeta).T.reshape((K, 3))
-    data.trajectory.u_vel[data.rank] = (data.matrices.W_dot @ zeta).T.reshape((K, 3))
-    data.trajectory.u_acc[data.rank] = (data.matrices.W_ddot @ zeta).T.reshape(K, 3)
-    return data
+    trajectory = data.trajectory.replace(
+        pos=data.trajectory.pos.at[data.rank].set(pos),
+        u_pos=data.trajectory.u_pos.at[data.rank].set(u_pos),
+        u_vel=data.trajectory.u_vel.at[data.rank].set(u_vel),
+        u_acc=data.trajectory.u_acc.at[data.rank].set(u_acc),
+    )
+    return data.replace(trajectory=trajectory)
 
 
 def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, SolverData]:
@@ -198,7 +208,7 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
             data.constraints[i] = c.update(c, zeta)
 
         if constraints_satisfied(zeta, data):
-            data.zeta[data.rank] = zeta
+            data = data.replace(zeta=data.zeta.at[data.rank].set(zeta))
             return True, i, data  # Exit loop, indicate success
 
         # Recalculate linear term for Bregman multiplier
@@ -211,7 +221,7 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
         rho *= settings.rho_init
         rho = min(rho, settings.rho_max)
 
-    data.zeta[data.rank] = zeta
+    data = data.replace(zeta=data.zeta.at[data.rank].set(zeta))
     return False, i, data  # Indicate failure but still return vector
 
 
@@ -265,10 +275,9 @@ def solve_drone(data: SolverData, settings: SolverSettings) -> tuple[bool, int, 
 
 
 def reset_cost_matrices(data: SolverData) -> SolverData:
-    """Reset cost matrices to initial values"""
-    data.quad_cost[...] = data.quad_cost_init
-    data.linear_cost[...] = 0
-    return data
+    Q_init = data.quad_cost.at[...].set(data.quad_cost_init)
+    q_init = jp.zeros_like(data.linear_cost)
+    return data.replace(quad_cost=Q_init, linear_cost=q_init)
 
 
 def reset_constraints(data: SolverData) -> SolverData:

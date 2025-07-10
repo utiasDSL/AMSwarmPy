@@ -33,8 +33,8 @@ class SolverSettings:
     collision_envelope: NDArray
 
     # MPC
-    K: int
-    N: int
+    K: int = field(pytree_node=False)
+    N: int = field(pytree_node=False)
     freq: float
     bf_gamma: float
     waypoints_pos_tol: float

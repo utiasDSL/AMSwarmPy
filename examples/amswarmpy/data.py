@@ -5,7 +5,6 @@ from functools import partial
 
 import jax
 import jax.numpy as jp
-import numpy as np
 from einops import rearrange
 from flax.struct import dataclass
 from jax import Array
@@ -31,12 +30,12 @@ class SolverData:
     # Swarm data. Tensors of shape (n_drones, ...)
     quad_cost: Array  # n_drones x 3 * (N + 1) x 3 * (N + 1)
     linear_cost: Array  # n_drones x 3 * (N + 1)
-    zeta: NDArray  # n_drones x 3 * (N + 1)
-    x_0: NDArray  # n_drones x 6 (pos, vel)
+    zeta: Array  # n_drones x 3 * (N + 1)
+    x_0: Array  # n_drones x 6 (pos, vel)
     trajectory: Trajectory
     previous_trajectory: Trajectory
-    obstacle_positions: list[NDArray]  # TODO: Move to fixed-sized tensor
-    distance_matrix: NDArray  # n_drones x n_drones
+    obstacle_positions: list[Array]  # TODO: Move to fixed-sized tensor
+    distance_matrix: Array  # n_drones x n_drones
     # Constraints
     constraints: list[PolarInequalityConstraint]
     pos_constraint: EqualityConstraint | None = None
@@ -64,8 +63,8 @@ class SolverData:
         n_drones = waypoints["pos"].shape[1]
         trajectory = Trajectory.init(waypoints["pos"][0, :], K, n_drones)
         # Init optimization variable
-        zeta = np.zeros((n_drones, 3 * (N + 1)))
-        x_0 = np.concat((waypoints["pos"][0, :], waypoints["vel"][0, :]), axis=-1)
+        zeta = jp.zeros((n_drones, 3 * (N + 1)))
+        x_0 = jp.concat((waypoints["pos"][0, :], waypoints["vel"][0, :]), axis=-1)
         matrices = Matrices.from_dynamics(A, B, A_prime, B_prime, K, N, freq)
 
         quad_cost, linear_cost_smoothness_const = init_cost(
@@ -80,49 +79,53 @@ class SolverData:
             rank=0,
             quad_cost=quad_cost,
             quad_cost_init=quad_cost[0].copy(),
-            linear_cost=np.zeros((n_drones, 3 * (N + 1))),
+            linear_cost=jp.zeros((n_drones, 3 * (N + 1))),
             linear_cost_smoothness_const=linear_cost_smoothness_const,
             zeta=zeta,
             x_0=x_0,
             trajectory=deepcopy(trajectory),
             previous_trajectory=trajectory,
             obstacle_positions=[],
-            distance_matrix=np.zeros((n_drones, n_drones)),
+            distance_matrix=jp.zeros((n_drones, n_drones)),
             constraints=[],
         )
 
 
-@dataclass
+@dataclass(frozen=False)
 class Trajectory:
     """Swarm trajectories"""
 
-    pos: np.ndarray  # n_drones x K+1 x 3 matrix, each row is position at a timestep
-    u_pos: np.ndarray  # n_drones x K x 3 matrix
-    u_vel: np.ndarray  # n_drones x K x 3 matrix
-    u_acc: np.ndarray  # n_drones x K x 3 matrix
+    pos: Array  # n_drones x K+1 x 3 matrix, each row is position at a timestep
+    u_pos: Array  # n_drones x K x 3 matrix
+    u_vel: Array  # n_drones x K x 3 matrix
+    u_acc: Array  # n_drones x K x 3 matrix
 
     @staticmethod
-    def init(pos: NDArray, K: int, n_drones: int) -> Trajectory:
+    @partial(jax.jit, static_argnames=("K", "n_drones"))
+    def init(pos: Array, K: int, n_drones: int) -> Trajectory:
         """Generate initial trajectory"""
         assert pos.shape == (n_drones, 3), f"{pos.shape} != {(n_drones, 3)}"
-        u_pos = np.tile(pos[:, None, :], (1, K, 1))
+        u_pos = jp.tile(pos[:, None, :], (1, K, 1))
         assert u_pos.shape == (n_drones, K, 3), f"{u_pos.shape} != {(n_drones, K, 3)}"
-        pos = np.tile(pos[:, None, :], (1, K + 1, 1))
+        pos = jp.tile(pos[:, None, :], (1, K + 1, 1))
         assert pos.shape == (n_drones, K + 1, 3), f"{pos.shape} != {(n_drones, K + 1, 3)}"
         return Trajectory(
-            pos=pos, u_pos=u_pos, u_vel=np.zeros((n_drones, K, 3)), u_acc=np.zeros((n_drones, K, 3))
+            pos=pos, u_pos=u_pos, u_vel=jp.zeros((n_drones, K, 3)), u_acc=jp.zeros((n_drones, K, 3))
         )
 
-    def step(self):
+    @staticmethod
+    @jax.jit
+    def step(traj: Trajectory) -> Trajectory:
         """Advance trajectories by one step for next solve iteration"""
         # Extrapolate last position by adding the difference between last two positions
-        extrapolated_pos = 2 * self.pos[:, -1] - self.pos[:, -2]
-        self.pos[:, :-1] = self.pos[:, 1:]
-        self.pos[:, -1] = extrapolated_pos
+        extrapolated_pos = 2 * traj.pos[:, -1] - traj.pos[:, -2]
+        pos = traj.pos.at[:, :-1].set(traj.pos[:, 1:])
+        pos = pos.at[:, -1].set(extrapolated_pos)
         # Advance input trajectories - only shift values since we only check first row
-        self.u_pos[:, :-1] = self.u_pos[:, 1:]
-        self.u_vel[:, :-1] = self.u_vel[:, 1:]
-        self.u_acc[:, :-1] = self.u_acc[:, 1:]
+        u_pos = traj.u_pos.at[:, :-1].set(traj.u_pos[:, 1:])
+        u_vel = traj.u_vel.at[:, :-1].set(traj.u_vel[:, 1:])
+        u_acc = traj.u_acc.at[:, :-1].set(traj.u_acc[:, 1:])
+        return traj.replace(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc)
 
 
 @dataclass
@@ -148,22 +151,20 @@ class Matrices:
     G_p: Array
 
     @staticmethod
+    @partial(jax.jit, static_argnames=("K", "N", "freq"))
     def from_dynamics(A, B, A_prime, B_prime, K: int, N: int, freq: int):
         W, W_dot, W_ddot = bernstein_matrices(K, N, freq)
-        W, W_dot, W_ddot = np.asarray(W), np.asarray(W_dot), np.asarray(W_ddot)
-        W_input = np.asarray(bernstein_input(W, W_dot))
+        W_input = bernstein_input(W, W_dot)
 
         S_x, S_u, S_x_prime, S_u_prime = full_horizon_dynamics(A, B, A_prime, B_prime, K)
-        S_x = np.asarray(S_x)
-        S_u, S_x_prime, S_u_prime = np.asarray(S_u), np.asarray(S_x_prime), np.asarray(S_u_prime)
         # Precompute matrices that don't change at solve time
         S_u_W_input = S_u @ W_input
 
         # Create an index of 0:3, 6:9, 12:15, ...
-        p_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., :3].flatten()
+        p_idx = jp.arange((K + 1) * 6).reshape(-1, 6)[..., :3].flatten()
         # Create an index of 3:6, 9:12, 15:18, ...
-        v_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
-        a_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
+        v_idx = jp.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
+        a_idx = jp.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
         M_p_S_u_W_input = S_u_W_input[p_idx]
         M_v_S_u_W_input = S_u_W_input[v_idx]
         M_a_S_u_prime_W_input = S_u_prime[a_idx] @ W_input
@@ -173,8 +174,8 @@ class Matrices:
         M_a_S_x_prime = S_x_prime[a_idx]
 
         # Precompute constraint matrices
-        G_u = np.concat((W[:3], W_dot[:3], W_ddot[:3]))
-        G_p = np.concat((M_p_S_u_W_input, -M_p_S_u_W_input))
+        G_u = jp.concat((W[:3], W_dot[:3], W_ddot[:3]))
+        G_p = jp.concat((M_p_S_u_W_input, -M_p_S_u_W_input))
 
         return Matrices(
             W=W,
@@ -197,6 +198,7 @@ class Matrices:
         )
 
 
+@partial(jax.jit, static_argnames=("n_drones"))
 def init_cost(
     smoothness_weight: float,
     input_smoothness_weight: float,
@@ -206,7 +208,7 @@ def init_cost(
 ) -> tuple[Array, Array]:
     K = matrices.W.shape[0] // 3
     quad = 2 * input_smoothness_weight * (matrices.W_ddot.T @ matrices.W_ddot)
-    a_idx = np.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
+    a_idx = jp.arange((K + 1) * 6).reshape(-1, 6)[..., 3:].flatten()
     quad += (
         2
         * smoothness_weight
@@ -216,7 +218,7 @@ def init_cost(
         @ matrices.W_input
     )
     quad += 2 * input_continuity_weight * matrices.G_u.T @ matrices.G_u
-    quad = np.tile(quad, (n_drones, 1, 1))
+    quad = jp.tile(quad, (n_drones, 1, 1))
     linear_smoothness_const = (
         2 * smoothness_weight * matrices.M_a_S_u_prime_W_input.T @ matrices.M_a_S_x_prime
     )

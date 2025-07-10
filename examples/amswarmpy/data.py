@@ -6,7 +6,7 @@ from functools import partial
 import jax
 import jax.numpy as jp
 from einops import rearrange
-from flax.struct import dataclass
+from flax.struct import dataclass, field
 from jax import Array
 from numpy.typing import NDArray
 
@@ -17,7 +17,7 @@ from .spline import bernstein_input, bernstein_matrices
 @dataclass
 class SolverData:
     # Constants
-    n_drones: int
+    n_drones: int = field(pytree_node=False)
     waypoints: dict[str, NDArray]
     matrices: Matrices
 
@@ -39,7 +39,7 @@ class SolverData:
     obstacle_positions: list[Array]  # TODO: Move to fixed-sized tensor
     distance_matrix: Array  # n_drones x n_drones
     # Constraints
-    constraints: list[PolarInequalityConstraint]
+    collision_constraints: PolarInequalityConstraint | None = None
     pos_constraint: EqualityConstraint | None = None
     vel_constraint: EqualityConstraint | None = None
     acc_constraint: EqualityConstraint | None = None
@@ -91,7 +91,6 @@ class SolverData:
             previous_trajectory=trajectory,
             obstacle_positions=[],
             distance_matrix=jp.zeros((n_drones, n_drones)),
-            constraints=[],
         )
 
 

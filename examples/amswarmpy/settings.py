@@ -12,10 +12,10 @@ class SolverSettings:
     rho_max: float  # Maximum allowable value of rho
 
     # Constraints
-    pos_constraints: bool
-    vel_constraints: bool
-    acc_constraints: bool
-    input_continuity_constraints: bool
+    pos_constraints: bool = field(pytree_node=False)
+    vel_constraints: bool = field(pytree_node=False)
+    acc_constraints: bool = field(pytree_node=False)
+    input_continuity_constraints: bool = field(pytree_node=False)
 
     # Weights
     pos_weight: float

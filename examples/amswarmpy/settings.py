@@ -35,7 +35,7 @@ class SolverSettings:
     # MPC
     K: int = field(pytree_node=False)
     N: int = field(pytree_node=False)
-    freq: float
+    freq: float = field(pytree_node=False)
     bf_gamma: float
     waypoints_pos_tol: float
     waypoints_vel_tol: float

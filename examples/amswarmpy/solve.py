@@ -16,16 +16,23 @@ from .settings import SolverSettings
 def solve_swarm(
     states: NDArray, t: float, data: SolverData, settings: SolverSettings
 ) -> tuple[list[bool], list[int], SolverData]:
-    n_drones = len(states)
-    pos = data.previous_trajectory.pos
-    col = 1.0 / settings.collision_envelope
-    distances = jp.linalg.norm((pos[None, ...] - pos[:, None, ...]) * col, axis=-1)
-    data = data.replace(distance_matrix=distances, x_0=states, current_time=t)
+    # The horizon is dynamically shaped based on which waypoints are in the current horizon. This is
+    # therefore the only function we cannot compile with jax.jit.
+    data = set_horizon(data, settings)
+    # After setting the horizon, everything else is static and hence gets compiled
+    return _solve_swarm(states, t, data, settings)
 
+
+def _solve_swarm(
+    states: NDArray, t: float, data: SolverData, settings: SolverSettings
+) -> tuple[list[bool], list[int], SolverData]:
+    distances = compute_swarm_distances(data, settings)
+    # Set the initial state and current time
+    data = data.replace(x_0=states, current_time=t, distance_matrix=distances)
     # Solve for each drone
-    is_success = np.zeros(n_drones, dtype=bool)
-    iters = np.zeros(n_drones)
-    for i in range(n_drones):
+    is_success = np.zeros(data.n_drones, dtype=bool)
+    iters = np.zeros(data.n_drones)
+    for i in range(data.n_drones):
         data = data.replace(rank=i)
         success, num_iters, data = solve_drone(data, settings)
         is_success[i] = success
@@ -33,30 +40,76 @@ def solve_swarm(
     return is_success, iters, data
 
 
+def set_horizon(data: SolverData, settings: SolverSettings) -> SolverData:
+    in_horizon, t_discrete = filter_horizon(
+        data.waypoints["time"][:, data.rank], data.current_time, settings.K, settings.freq
+    )
+    in_horizon = jp.where(in_horizon)[0]
+    if len(in_horizon) < 1:
+        raise RuntimeError(
+            "Error: no waypoints within current horizon. Increase horizon or add waypoints."
+        )
+    return data.replace(in_horizon=in_horizon, t_discrete=t_discrete)
+
+
+@jax.jit
+def compute_swarm_distances(data: SolverData, settings: SolverSettings) -> Array:
+    pos = data.previous_trajectory.pos
+    col = 1.0 / settings.collision_envelope
+    distances = jp.linalg.norm((pos[None, ...] - pos[:, None, ...]) * col, axis=-1)
+    return distances
+
+
+def solve_drone(data: SolverData, settings: SolverSettings) -> tuple[bool, int, SolverData]:
+    """Main solve function to be called by user."""
+    # Reset cost and clear carryover constraints from previous solves
+    data = reset_cost_matrices(data)
+    data = reset_constraints(data)
+    data = add_constraints(data, settings)  # Build new constraints and add to cost matrices
+    success, iters, data = am_solve(data, settings)  # Solve with AM algorithm
+    data = spline2states(data, settings)
+    return success, iters, data
+
+
+@jax.jit
+def reset_cost_matrices(data: SolverData) -> SolverData:
+    Q_init = data.quad_cost.at[...].set(data.quad_cost_init)
+    q_init = jp.zeros_like(data.linear_cost)
+    return data.replace(quad_cost=Q_init, linear_cost=q_init)
+
+
+@jax.jit
+def reset_constraints(data: SolverData) -> SolverData:
+    """Reset constraints to initial values"""
+    data = data.replace(constraints=[])
+    data = data.replace(
+        pos_constraint=None,
+        vel_constraint=None,
+        acc_constraint=None,
+        input_continuity_constraint=None,
+        max_pos_constraint=None,
+        max_vel_constraint=None,
+        max_acc_constraint=None,
+    )
+    return data
+
+
 def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     """Setup optimization problem before solving.
 
     Override of AMSolver method that configures constraints and cost functions.
     """
-    # Extract waypoints in current horizon. Each row is a waypoint of form:
-    # [k, x, y, z, vx, vy, vz, ax, ay, az]. k is discrete STEP in current horizon
-    K, freq = settings.K, settings.freq
     assert data.zeta is not None, "Zeta must be initialized before adding constraints"
-
-    mask, steps = filter_horizon(data.waypoints["time"][:, data.rank], data.current_time, K, freq)
-    if np.sum(mask) < 1:
-        raise RuntimeError(
-            "Error: no waypoints within current horizon. Increase horizon or add waypoints."
-        )
-    steps = steps[mask]
+    assert data.in_horizon is not None, "In horizon must be initialized before adding constraints"
     # Separate and reshape waypoints into position, velocity, and acceleration vectors
-    des_pos = data.waypoints["pos"][:, data.rank][mask].flatten()
-    des_vel = data.waypoints["vel"][:, data.rank][mask].flatten()
-    des_acc = data.waypoints["acc"][:, data.rank][mask].flatten()
+    des_pos = data.waypoints["pos"][:, data.rank][data.in_horizon].flatten()
+    des_vel = data.waypoints["vel"][:, data.rank][data.in_horizon].flatten()
+    des_acc = data.waypoints["acc"][:, data.rank][data.in_horizon].flatten()
 
     # Extract penalized steps from first column of waypoints
     # First possible penalized step is 1, NOT 0 (input cannot affect initial state)
-    wp_idx = np.repeat(steps, 3) * 3 + np.tile(np.arange(3, dtype=int), len(steps))
+    step_idx = data.t_discrete[data.in_horizon]
+    t_idx = jp.repeat(step_idx, 3) * 3 + jp.tile(jp.arange(3, dtype=int), len(step_idx))
 
     x_0 = data.x_0[data.rank]
     linear_cost = data.linear_cost[data.rank]
@@ -66,8 +119,8 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
 
     # --- Add constraints - see thesis document for derivations ---
     # Waypoint position cost and/or equality constraint
-    G_wp = data.matrices.M_p_S_u_W_input[wp_idx]
-    h_wp = des_pos - data.matrices.M_p_S_x[wp_idx] @ x_0
+    G_wp = data.matrices.M_p_S_u_W_input[t_idx]
+    h_wp = des_pos - data.matrices.M_p_S_x[t_idx] @ x_0
 
     quad_cost += 2 * settings.pos_weight * G_wp.T @ G_wp
     linear_cost += -2 * settings.pos_weight * G_wp.T @ h_wp
@@ -77,16 +130,16 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
         )
 
     # Waypoint velocity cost and/or equality constraint
-    G_wv = data.matrices.M_v_S_u_W_input[wp_idx]
-    h_wv = des_vel - data.matrices.M_v_S_x[wp_idx] @ x_0
+    G_wv = data.matrices.M_v_S_u_W_input[t_idx]
+    h_wv = des_vel - data.matrices.M_v_S_x[t_idx] @ x_0
     quad_cost += 2 * settings.vel_weight * G_wv.T @ G_wv
     linear_cost += -2 * settings.vel_weight * G_wv.T @ h_wv
     if settings.vel_constraints:
         data.vel_constraint = EqualityConstraint.init(G_wv, h_wv, settings.waypoints_vel_tol)
 
     # Waypoint acceleration cost and/or equality constraint
-    G_wa = data.matrices.M_a_S_u_prime_W_input[wp_idx]
-    h_wa = des_acc - data.matrices.M_a_S_x_prime[wp_idx] @ x_0
+    G_wa = data.matrices.M_a_S_u_prime_W_input[t_idx]
+    h_wa = des_acc - data.matrices.M_a_S_x_prime[t_idx] @ x_0
     quad_cost += 2 * settings.acc_weight * G_wa.T @ G_wa
     linear_cost += -2 * settings.acc_weight * G_wa.T @ h_wa
     if settings.acc_constraints:
@@ -106,8 +159,8 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
         )
 
     # Position constraint
-    upper = np.tile(settings.pos_max, K + 1) - data.matrices.M_p_S_x @ x_0
-    lower = -np.tile(settings.pos_min, K + 1) + data.matrices.M_p_S_x @ x_0
+    upper = np.tile(settings.pos_max, settings.K + 1) - data.matrices.M_p_S_x @ x_0
+    lower = -np.tile(settings.pos_min, settings.K + 1) + data.matrices.M_p_S_x @ x_0
     h_p = np.concatenate([upper, lower])
     data = data.replace(
         max_pos_constraint=InequalityConstraint.init(data.matrices.G_p, h_p, settings.pos_limit_tol)
@@ -140,7 +193,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
         if i == data.rank:
             continue
         if np.any(data.distance_matrix <= 1.0, axis=-1)[i, data.rank]:
-            envelope = np.tile(1 / settings.collision_envelope, K + 1)
+            envelope = np.tile(1 / settings.collision_envelope, settings.K + 1)
             G_c = envelope[:, None] * data.matrices.M_p_S_u_W_input
             c_c = envelope * (
                 data.matrices.M_p_S_x @ x_0 - data.previous_trajectory.pos[i].flatten()
@@ -263,38 +316,6 @@ def linear_constraint_costs(data: SolverData) -> Array:
     return q_cnstr
 
 
-def solve_drone(data: SolverData, settings: SolverSettings) -> tuple[bool, int, SolverData]:
-    """Main solve function to be called by user."""
-    # Reset cost and clear carryover constraints from previous solves
-    data = reset_cost_matrices(data)
-    data = reset_constraints(data)
-    data = add_constraints(data, settings)  # Build new constraints and add to cost matrices
-    success, iters, data = am_solve(data, settings)  # Solve with AM algorithm
-    data = spline2states(data, settings)
-    return success, iters, data
-
-
-def reset_cost_matrices(data: SolverData) -> SolverData:
-    Q_init = data.quad_cost.at[...].set(data.quad_cost_init)
-    q_init = jp.zeros_like(data.linear_cost)
-    return data.replace(quad_cost=Q_init, linear_cost=q_init)
-
-
-def reset_constraints(data: SolverData) -> SolverData:
-    """Reset constraints to initial values"""
-    data.constraints.clear()
-    data = data.replace(
-        pos_constraint=None,
-        vel_constraint=None,
-        acc_constraint=None,
-        input_continuity_constraint=None,
-        max_pos_constraint=None,
-        max_vel_constraint=None,
-        max_acc_constraint=None,
-    )
-    return data
-
-
 @jax.jit
 def constraints_satisfied(zeta: Array, data: SolverData) -> Array:
     """Check if all constraints are satisfied"""
@@ -332,8 +353,4 @@ def filter_horizon(times: Array, t: float, K: int, mpc_freq: float) -> tuple[Arr
     rounded_times = jp.asarray(jp.round((times - t) * mpc_freq), dtype=int)
     # Find time steps with waypoints within current horizon
     in_horizon = (rounded_times > 0) & (rounded_times <= K)
-    if len(in_horizon) == 0:
-        raise RuntimeError(
-            "Error: no waypoints within current horizon. Increase horizon or add waypoints."
-        )
     return in_horizon, rounded_times

@@ -26,6 +26,8 @@ class SolverData:
     rank: int  # TODO: Remove
     quad_cost_init: Array  # 3 * (N + 1) x 3 * (N + 1)
     linear_cost_smoothness_const: Array  # 3 * (N + 1)
+    in_horizon: Array | None  # dynamic shape! If the shape changes, jax recompiles
+    t_discrete: Array | None  # T
 
     # Swarm data. Tensors of shape (n_drones, ...)
     quad_cost: Array  # n_drones x 3 * (N + 1) x 3 * (N + 1)
@@ -77,6 +79,8 @@ class SolverData:
             matrices=matrices,
             current_time=waypoints["time"][0, 0],
             rank=0,
+            in_horizon=None,
+            t_discrete=None,
             quad_cost=quad_cost,
             quad_cost_init=quad_cost[0].copy(),
             linear_cost=jp.zeros((n_drones, 3 * (N + 1))),

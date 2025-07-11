@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
     from crazyflow import Sim
     from numpy.typing import NDArray
 
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
 jax.config.update("jax_platform_name", "cpu")
 
 logger = logging.getLogger(__name__)
@@ -38,15 +40,15 @@ def render_solutions(sim, trajectories: list[np.ndarray]):
 def generate_waypoints(n_drones: int, n_points: int = 4, duration_sec: float = 10.0):
     """Waypoints have the following shape: [T, n_drones, 3]."""
     radius = 0.75
-    phase = np.linspace(0, 2 * (1 - 1 / n_drones) * np.pi, n_drones)
-    t = np.tile(np.linspace(0, duration_sec, n_points), (n_drones, 1)).T
+    phase = np.linspace(0, 2 * (1 - 1 / n_drones) * np.pi, n_drones)[..., None]
+    t = np.tile(np.linspace(0, duration_sec, n_points), (n_drones, 1))
     x = np.cos(0.1 * t * np.pi + phase) * radius
     y = np.sin(0.1 * t * np.pi + phase) * radius
-    z = np.ones_like(x) * np.linspace(0.5, 1.5, n_points)[:, None]
+    z = np.ones_like(x) * np.linspace(0.5, 1.5, n_points)
     pos = np.stack([x, y, z], axis=-1)
     vel = np.zeros_like(pos)
     acc = np.zeros_like(pos)
-    assert pos.shape == (n_points, n_drones, 3), f"Shape {pos.shape} != ({n_points}, {n_drones}, 3)"
+    assert pos.shape == (n_drones, n_points, 3), f"Shape {pos.shape} != ({n_drones}, {n_points}, 3)"
     return {"time": t, "pos": pos, "vel": vel, "acc": acc}
 
 
@@ -70,11 +72,11 @@ def solve_swarm(swarm, current_time, initial_states, input_drone_results, constr
 def legacy_waypoints(waypoints):
     """Convert waypoints to the legacy format."""
     res = {}
-    n_drones = waypoints["pos"].shape[1]
+    n_drones = waypoints["pos"].shape[0]
     t = waypoints["time"]
     for i in range(n_drones):
         res[i] = np.concat(
-            (t[:, i, None], waypoints["pos"][:, i], waypoints["vel"][:, i], waypoints["acc"][:, i]),
+            (t[i, ..., None], waypoints["pos"][i], waypoints["vel"][i], waypoints["acc"][i]),
             axis=-1,
         )
     return res
@@ -183,7 +185,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
 
     # Setup simulation parameters
     n_drones = sim.n_drones
-    n_steps = int(waypoints["time"][-1, 0] * settings.freq)
+    n_steps = int(waypoints["time"][0, -1] * settings.freq)
 
     dynamics = config["Dynamics"]
     A, B = np.asarray(dynamics["A"]), np.asarray(dynamics["B"])
@@ -203,12 +205,12 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         input_continuity_weight=settings.input_continuity_weight,
     )
 
-    states = np.concat((waypoints["pos"][0], np.zeros((n_drones, 3))), axis=-1)
+    states = np.concat((waypoints["pos"][:, 0], np.zeros((n_drones, 3))), axis=-1)
     success, _, solver_data = amswarmpy.solve(states, 0, solver_data, settings)
     if not all(success):
         logger.warning("Solve failed")
 
-    pos, vel = waypoints["pos"][0], waypoints["vel"][0]
+    pos, vel = waypoints["pos"][:, 0], waypoints["vel"][:, 0]
 
     sim.reset()
     # Set initial position states to first waypoint for each drone
@@ -235,7 +237,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         if render:
             render_solutions(sim, solver_data.trajectory.pos)
             for i in range(n_drones):
-                draw_points(sim, waypoints["pos"][:, i, :], rgba=rgbas[i], size=0.02)
+                draw_points(sim, waypoints["pos"][i], rgba=rgbas[i], size=0.02)
             sim.render()
 
         pos, vel = np.asarray(sim.data.states.pos[0]), np.asarray(sim.data.states.vel[0])
@@ -265,7 +267,7 @@ def plot_trajectories(sim, waypoints, pos_amswarm, pos_amswarmpy):
             )
 
         # Plot waypoints
-        pos = waypoints["pos"][:, i, :]
+        pos = waypoints["pos"][i]
         ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], marker="x", color=rgbas[i])
 
     ax.set_xlabel("X")

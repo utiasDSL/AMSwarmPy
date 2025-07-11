@@ -61,11 +61,11 @@ class SolverData:
         input_smoothness_weight: float,
         input_continuity_weight: float,
     ) -> SolverData:
-        n_drones = waypoints["pos"].shape[1]
-        trajectory = Trajectory.init(waypoints["pos"][0, :], K, n_drones)
+        n_drones = waypoints["pos"].shape[0]
+        trajectory = Trajectory.init(waypoints["pos"][:, 0], K, n_drones)
         # Init optimization variable
         zeta = jp.zeros((n_drones, 3 * (N + 1)))
-        x_0 = jp.concat((waypoints["pos"][0, :], waypoints["vel"][0, :]), axis=-1)
+        x_0 = jp.concat((waypoints["pos"][:, 0], waypoints["vel"][:, 0]), axis=-1)
         matrices = Matrices.from_dynamics(A, B, A_prime, B_prime, K, N, freq)
 
         quad_cost, linear_cost_smoothness_const = init_cost(

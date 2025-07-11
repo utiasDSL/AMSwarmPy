@@ -14,7 +14,7 @@ from .settings import SolverSettings
 
 def solve(
     states: NDArray, t: float, data: SolverData, settings: SolverSettings
-) -> tuple[list[bool], list[int], SolverData]:
+) -> tuple[Array[bool], Array[int], SolverData]:
     # The horizon is dynamically shaped based on which waypoints are in the current horizon. This is
     # therefore the only function we cannot compile with jax.jit.
     data = set_horizon(data, settings)
@@ -25,7 +25,7 @@ def solve(
 @jax.jit
 def solve_swarm(
     states: NDArray, t: float, data: SolverData, settings: SolverSettings
-) -> tuple[list[bool], list[int], SolverData]:
+) -> tuple[Array[bool], Array[int], SolverData]:
     distances = compute_swarm_distances(data, settings)
     # Set the initial state and current time
     data = data.replace(x_0=states, current_time=t, distance_matrix=distances)
@@ -43,7 +43,7 @@ def solve_swarm(
 
 def set_horizon(data: SolverData, settings: SolverSettings) -> SolverData:
     in_horizon, t_discrete = filter_horizon(
-        data.waypoints["time"][:, data.rank], data.current_time, settings.K, settings.freq
+        data.waypoints["time"][data.rank], data.current_time, settings.K, settings.freq
     )
     in_horizon = jp.where(in_horizon)[0]
     if len(in_horizon) < 1:
@@ -107,9 +107,9 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     assert data.zeta is not None, "Zeta must be initialized before adding constraints"
     assert data.in_horizon is not None, "In horizon must be initialized before adding constraints"
     # Separate and reshape waypoints into position, velocity, and acceleration vectors
-    des_pos = data.waypoints["pos"][:, data.rank][data.in_horizon].flatten()
-    des_vel = data.waypoints["vel"][:, data.rank][data.in_horizon].flatten()
-    des_acc = data.waypoints["acc"][:, data.rank][data.in_horizon].flatten()
+    des_pos = data.waypoints["pos"][data.rank][data.in_horizon].flatten()
+    des_vel = data.waypoints["vel"][data.rank][data.in_horizon].flatten()
+    des_acc = data.waypoints["acc"][data.rank][data.in_horizon].flatten()
 
     # Extract penalized steps from first column of waypoints
     # First possible penalized step is 1, NOT 0 (input cannot affect initial state)

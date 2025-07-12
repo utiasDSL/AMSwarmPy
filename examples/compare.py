@@ -226,9 +226,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
             logger.warning("Solve failed")
 
         solver_data = solver_data.step(solver_data)
-        control = solver_data.pos[:, 1]
-        control = np.concat([control, np.zeros((control.shape[0], 10))], axis=-1)
-        control = control[None, ...]
+        control[0, :, :3] = solver_data.pos[:, 1]
 
         sim.state_control(control)
         sim.step(sim.freq // settings.freq)

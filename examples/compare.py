@@ -14,13 +14,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 from crazyflow import Sim
+from crazyflow.utils import enable_cache
 from utils import draw_line, draw_points
 
 if TYPE_CHECKING:
     from crazyflow import Sim
     from numpy.typing import NDArray
 
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
+enable_cache()
 jax.config.update("jax_platform_name", "cpu")
 
 logger = logging.getLogger(__name__)
@@ -181,7 +182,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     for k, v in settings.items():
         if isinstance(v, list):
             settings[k] = np.asarray(v)
-    settings = amswarmpy.SolverSettings(**settings)
+    settings = amswarmpy.SolverSettings(n_drones=sim.n_drones, **settings)
 
     # Setup simulation parameters
     n_drones = sim.n_drones
@@ -205,7 +206,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         input_continuity_weight=settings.input_continuity_weight,
     )
 
-    states = np.concat((waypoints["pos"][:, 0], np.zeros((n_drones, 3))), axis=-1)
+    states = np.concat((waypoints["pos"][:, 0], np.zeros((n_drones, 3))), axis=-1, dtype=np.float32)
     success, _, solver_data = amswarmpy.solve(states, 0, solver_data, settings)
     if not all(success):
         logger.warning("Solve failed")
@@ -219,23 +220,20 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     for step in range(n_steps):
         t = step / settings.freq
 
-        states = np.concat((pos, vel), axis=-1)
+        states = np.concat((pos, vel), axis=-1, dtype=np.float32)
         success, _, solver_data = amswarmpy.solve(states, t, solver_data, settings)
         if not all(success):
             logger.warning("Solve failed")
 
-        solver_data = solver_data.replace(
-            trajectory=solver_data.trajectory.step(solver_data.trajectory),
-        )
-        solver_data = solver_data.replace(previous_trajectory=solver_data.trajectory)
-        control = solver_data.trajectory.pos[:, 1]
+        solver_data = solver_data.step(solver_data)
+        control = solver_data.pos[:, 1]
         control = np.concat([control, np.zeros((control.shape[0], 10))], axis=-1)
         control = control[None, ...]
 
         sim.state_control(control)
         sim.step(sim.freq // settings.freq)
         if render:
-            render_solutions(sim, solver_data.trajectory.pos)
+            render_solutions(sim, solver_data.pos)
             for i in range(n_drones):
                 draw_points(sim, waypoints["pos"][i], rgba=rgbas[i], size=0.02)
             sim.render()
@@ -302,6 +300,6 @@ def main(render: bool = False):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    logging.getLogger("jax").setLevel(logging.ERROR)
+    logging.getLogger("jax").setLevel(logging.WARNING)
     logger.setLevel(logging.ERROR)
     fire.Fire(main)

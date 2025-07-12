@@ -6,6 +6,7 @@ from numpy.typing import NDArray
 
 @dataclass
 class SolverSettings:
+    n_drones: int = field(pytree_node=False)
     # AMSwarm solver iteration settings
     max_iters: int = field(pytree_node=False)  # Maximum number of iterations
     rho_init: float  # Initial value of rho

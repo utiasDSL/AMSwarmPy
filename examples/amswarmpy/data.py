@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from functools import partial
 
 import jax
 import jax.numpy as jp
 from einops import rearrange
-from flax.struct import dataclass, field
+from flax.struct import dataclass
 from jax import Array
+from jax.sharding import PartitionSpec as P
 from numpy.typing import NDArray
 
 from .constraint import EqualityConstraint, InequalityConstraint, PolarInequalityConstraint
@@ -16,27 +16,21 @@ from .spline import bernstein_input, bernstein_matrices
 
 @dataclass
 class SolverData:
-    # Constants
-    n_drones: int = field(pytree_node=False)
-    waypoints: dict[str, NDArray]
-    matrices: Matrices
-
     # Shared data across drones
-    current_time: float
-    rank: int  # TODO: Remove
-    quad_cost_init: Array  # 3 * (N + 1) x 3 * (N + 1)
-    linear_cost_smoothness_const: Array  # 3 * (N + 1)
-    in_horizon: Array | None  # dynamic shape! If the shape changes, jax recompiles
-    t_discrete: Array | None  # T
+    shared: SharedData
 
     # Swarm data. Tensors of shape (n_drones, ...)
-    quad_cost: Array  # n_drones x 3 * (N + 1) x 3 * (N + 1)
-    linear_cost: Array  # n_drones x 3 * (N + 1)
+    waypoints: dict[str, Array]
     zeta: Array  # n_drones x 3 * (N + 1)
     x_0: Array  # n_drones x 6 (pos, vel)
-    trajectory: Trajectory
-    previous_trajectory: Trajectory
-    distance_matrix: Array  # n_drones x n_drones
+    pos: Array  # n_drones x K+1 x 3 matrix, each row is position at a timestep
+    u_pos: Array  # n_drones x K x 3 matrix
+    u_vel: Array  # n_drones x K x 3 matrix
+    u_acc: Array  # n_drones x K x 3 matrix
+    distances: Array  # n_drones x n_drones x K+1 matrix
+    quad_cost: Array  # n_drones x 3 * (N + 1) x 3 * (N + 1)
+    linear_cost: Array  # n_drones x 3 * (N + 1)
+
     # Constraints
     collision_constraints: PolarInequalityConstraint | None = None
     pos_constraint: EqualityConstraint | None = None
@@ -62,71 +56,99 @@ class SolverData:
         input_continuity_weight: float,
     ) -> SolverData:
         n_drones = waypoints["pos"].shape[0]
-        trajectory = Trajectory.init(waypoints["pos"][:, 0], K, n_drones)
-        # Init optimization variable
+        pos = waypoints["pos"][:, 0]
+        u_pos = jp.tile(pos[:, None, :], (1, K, 1))
+        pos = jp.tile(pos[:, None, :], (1, K + 1, 1))
+        assert pos.shape == (n_drones, K + 1, 3), f"{pos.shape} != {(n_drones, K + 1, 3)}"
+        assert u_pos.shape == (n_drones, K, 3), f"{u_pos.shape} != {(n_drones, K, 3)}"
+        # Init optimization variable. TODO: Random init?
         zeta = jp.zeros((n_drones, 3 * (N + 1)))
         x_0 = jp.concat((waypoints["pos"][:, 0], waypoints["vel"][:, 0]), axis=-1)
         matrices = Matrices.from_dynamics(A, B, A_prime, B_prime, K, N, freq)
-
         quad_cost, linear_cost_smoothness_const = init_cost(
             smoothness_weight, input_smoothness_weight, input_continuity_weight, matrices, n_drones
         )
-
-        return SolverData(
-            n_drones=n_drones,
-            waypoints=waypoints,
+        shared_data = SharedData(
             matrices=matrices,
             current_time=waypoints["time"][0, 0],
-            rank=0,
-            in_horizon=None,
-            t_discrete=None,
-            quad_cost=quad_cost,
-            quad_cost_init=quad_cost[0].copy(),
-            linear_cost=jp.zeros((n_drones, 3 * (N + 1))),
+            quad_cost_init=quad_cost[0],
+            pos=pos,
             linear_cost_smoothness_const=linear_cost_smoothness_const,
-            zeta=zeta,
-            x_0=x_0,
-            trajectory=deepcopy(trajectory),
-            previous_trajectory=trajectory,
-            distance_matrix=jp.zeros((n_drones, n_drones)),
         )
 
-
-@dataclass(frozen=False)
-class Trajectory:
-    """Swarm trajectories"""
-
-    pos: Array  # n_drones x K+1 x 3 matrix, each row is position at a timestep
-    u_pos: Array  # n_drones x K x 3 matrix
-    u_vel: Array  # n_drones x K x 3 matrix
-    u_acc: Array  # n_drones x K x 3 matrix
-
-    @staticmethod
-    @partial(jax.jit, static_argnames=("K", "n_drones"))
-    def init(pos: Array, K: int, n_drones: int) -> Trajectory:
-        """Generate initial trajectory"""
-        assert pos.shape == (n_drones, 3), f"{pos.shape} != {(n_drones, 3)}"
-        u_pos = jp.tile(pos[:, None, :], (1, K, 1))
-        assert u_pos.shape == (n_drones, K, 3), f"{u_pos.shape} != {(n_drones, K, 3)}"
-        pos = jp.tile(pos[:, None, :], (1, K + 1, 1))
-        assert pos.shape == (n_drones, K + 1, 3), f"{pos.shape} != {(n_drones, K + 1, 3)}"
-        return Trajectory(
-            pos=pos, u_pos=u_pos, u_vel=jp.zeros((n_drones, K, 3)), u_acc=jp.zeros((n_drones, K, 3))
+        return SolverData(
+            shared=shared_data,
+            waypoints=waypoints,
+            quad_cost=quad_cost,
+            linear_cost=jp.zeros((n_drones, 3 * (N + 1))),
+            zeta=zeta,
+            x_0=x_0,
+            pos=pos,
+            distances=jp.zeros((n_drones, n_drones, K + 1)),
+            u_pos=jp.zeros((n_drones, K, 3)),
+            u_vel=jp.zeros((n_drones, K, 3)),
+            u_acc=jp.zeros((n_drones, K, 3)),
         )
 
     @staticmethod
     @jax.jit
-    def step(traj: Trajectory) -> Trajectory:
+    def step(data: SolverData) -> SolverData:
         """Advance trajectories by one step for next solve iteration"""
         # Extrapolate last position by adding the difference between last two positions
-        extrapolated_pos = 2 * traj.pos[:, -1] - traj.pos[:, -2]
-        pos = traj.pos.at[:, :-1].set(traj.pos[:, 1:])
+        extrapolated_pos = 2 * data.pos[:, -1] - data.pos[:, -2]
+        pos = data.pos.at[:, :-1].set(data.pos[:, 1:])
         pos = pos.at[:, -1].set(extrapolated_pos)
         # Advance input trajectories - only shift values since we only check first row
-        u_pos = traj.u_pos.at[:, :-1].set(traj.u_pos[:, 1:])
-        u_vel = traj.u_vel.at[:, :-1].set(traj.u_vel[:, 1:])
-        u_acc = traj.u_acc.at[:, :-1].set(traj.u_acc[:, 1:])
-        return traj.replace(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc)
+        u_pos = data.u_pos.at[:, :-1].set(data.u_pos[:, 1:])
+        u_vel = data.u_vel.at[:, :-1].set(data.u_vel[:, 1:])
+        u_acc = data.u_acc.at[:, :-1].set(data.u_acc[:, 1:])
+        data = data.replace(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc)
+        data = data.replace(shared=data.shared.replace(pos=pos))
+        return data
+
+    @staticmethod
+    def distribute(data: SolverData) -> SolverData:
+        n_drones = data.zeta.shape[0]
+        available_cores = jp.clip(jax.local_device_count(), 1, n_drones)
+        n_cores = (n_drones // available_cores) * available_cores
+        mesh = jax.make_mesh((n_cores,), "x")
+        sharding = jax.sharding.NamedSharding(mesh, P("x"))
+        data = data.replace(zeta=jax.device_put(data.zeta, sharding))
+        return data
+
+
+solver_data_vmap_axes = SolverData(
+    shared=None,
+    waypoints=0,
+    quad_cost=0,
+    linear_cost=0,
+    zeta=0,
+    x_0=0,
+    pos=0,
+    u_pos=0,
+    u_vel=0,
+    u_acc=0,
+    distances=0,
+    collision_constraints=None,
+    pos_constraint=None,
+    vel_constraint=None,
+    acc_constraint=None,
+    input_continuity_constraint=None,
+    max_pos_constraint=None,
+    max_vel_constraint=None,
+    max_acc_constraint=None,
+)
+
+
+@dataclass
+class SharedData:
+    matrices: Matrices
+    current_time: float
+    quad_cost_init: Array  # 3 * (N + 1) x 3 * (N + 1)
+    linear_cost_smoothness_const: Array  # 3 * (N + 1)
+    pos: Array  # n_drones x K+1 x 3 matrix, a shared copy of the pos array
+    in_horizon: Array | None = None  # dynamic shape! If the shape changes, jax recompiles
+    t_discrete: Array | None = None  # T
 
 
 @dataclass

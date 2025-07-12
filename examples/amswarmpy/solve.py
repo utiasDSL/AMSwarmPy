@@ -8,7 +8,7 @@ from jax import Array
 from numpy.typing import NDArray
 
 from .constraint import EqualityConstraint, InequalityConstraint, PolarInequalityConstraint
-from .data import SolverData
+from .data import SolverData, solver_data_vmap_axes
 from .settings import SolverSettings
 
 
@@ -17,48 +17,47 @@ def solve(
 ) -> tuple[Array[bool], Array[int], SolverData]:
     # The horizon is dynamically shaped based on which waypoints are in the current horizon. This is
     # therefore the only function we cannot compile with jax.jit.
-    data = set_horizon(data, settings)
+    data = set_horizon(float(t), data, settings)
     # After setting the horizon, everything else is static and hence gets compiled
-    return solve_swarm(states, t, data, settings)
+    return solve_swarm(states, data, settings)
 
 
 @jax.jit
 def solve_swarm(
-    states: NDArray, t: float, data: SolverData, settings: SolverSettings
+    states: NDArray, data: SolverData, settings: SolverSettings
 ) -> tuple[Array[bool], Array[int], SolverData]:
     distances = compute_swarm_distances(data, settings)
-    # Set the initial state and current time
-    data = data.replace(x_0=states, current_time=t, distance_matrix=distances)
-
-    # Solve for each drone
-    def solve(data: SolverData, rank: Array) -> tuple[SolverData, tuple[bool, int]]:
-        data = data.replace(rank=rank)
-        success, n_iters, data = solve_drone(data, settings)
-        return data, (success, n_iters)
-
-    # success, iters, data = jax.vmap(solve_drone, in_axes=(0, None))(data, settings)
-    data, (success, iters) = jax.lax.scan(solve, data, jp.arange(data.n_drones), data.n_drones)
+    # Set the initial state and distances
+    data = data.replace(x_0=states, distances=distances)
+    # We want to use the data in shared without vmapping its members. We cannot make it static
+    # because it contains Arrays. Hence we broadcast and prevent a growth in dimensions by resetting
+    # shared after the vmap.
+    shared = data.shared
+    success, iters, data = jax.vmap(solve_drone, in_axes=(solver_data_vmap_axes, None))(
+        data, settings
+    )
+    # Reset shared to default dimensions using shared (not data.shared) and set pos to current pos
+    data = data.replace(shared=shared.replace(pos=data.pos))  # Reset to default dimensions
     return success, iters, data
 
 
-def set_horizon(data: SolverData, settings: SolverSettings) -> SolverData:
-    in_horizon, t_discrete = filter_horizon(
-        data.waypoints["time"][data.rank], data.current_time, settings.K, settings.freq
-    )
+def set_horizon(t: float, data: SolverData, settings: SolverSettings) -> SolverData:
+    in_horizon, t_discrete = filter_horizon(data.waypoints["time"][0], t, settings.K, settings.freq)
     in_horizon = jp.where(in_horizon)[0]
     if len(in_horizon) < 1:
         raise RuntimeError(
             "Error: no waypoints within current horizon. Increase horizon or add waypoints."
         )
-    return data.replace(in_horizon=in_horizon, t_discrete=t_discrete)
+    return data.replace(
+        shared=data.shared.replace(in_horizon=in_horizon, t_discrete=t_discrete, current_time=t)
+    )
 
 
 @jax.jit
 def compute_swarm_distances(data: SolverData, settings: SolverSettings) -> Array:
-    pos = data.previous_trajectory.pos
     col = 1.0 / settings.collision_envelope
-    distances = jp.linalg.norm((pos[None, ...] - pos[:, None, ...]) * col, axis=-1)
-    distances = jp.where(jp.eye(data.n_drones, dtype=bool)[..., None], jp.inf, distances)
+    distances = jp.linalg.norm((data.pos[None, ...] - data.pos[:, None, ...]) * col, axis=-1)
+    distances = jp.where(jp.eye(settings.n_drones, dtype=bool)[..., None], jp.inf, distances)
     return distances
 
 
@@ -77,7 +76,7 @@ def solve_drone(data: SolverData, settings: SolverSettings) -> tuple[bool, int, 
 
 @jax.jit
 def reset_cost_matrices(data: SolverData) -> SolverData:
-    Q_init = data.quad_cost.at[...].set(data.quad_cost_init)
+    Q_init = data.quad_cost.at[...].set(data.shared.quad_cost_init)
     q_init = jp.zeros_like(data.linear_cost)
     return data.replace(quad_cost=Q_init, linear_cost=q_init)
 
@@ -104,28 +103,29 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
 
     Override of AMSolver method that configures constraints and cost functions.
     """
-    assert data.zeta is not None, "Zeta must be initialized before adding constraints"
-    assert data.in_horizon is not None, "In horizon must be initialized before adding constraints"
+    assert data.zeta is not None, "Zeta must be initialized"
+    assert data.shared.in_horizon is not None, "In horizon must be initialized"
     # Separate and reshape waypoints into position, velocity, and acceleration vectors
-    des_pos = data.waypoints["pos"][data.rank][data.in_horizon].flatten()
-    des_vel = data.waypoints["vel"][data.rank][data.in_horizon].flatten()
-    des_acc = data.waypoints["acc"][data.rank][data.in_horizon].flatten()
+    des_pos = data.waypoints["pos"][data.shared.in_horizon].flatten()
+    des_vel = data.waypoints["vel"][data.shared.in_horizon].flatten()
+    des_acc = data.waypoints["acc"][data.shared.in_horizon].flatten()
 
     # Extract penalized steps from first column of waypoints
     # First possible penalized step is 1, NOT 0 (input cannot affect initial state)
-    step_idx = data.t_discrete[data.in_horizon]
+    step_idx = data.shared.t_discrete[data.shared.in_horizon]
     t_idx = jp.repeat(step_idx, 3) * 3 + jp.tile(jp.arange(3, dtype=int), len(step_idx))
 
-    x_0 = data.x_0[data.rank]
-    linear_cost = data.linear_cost[data.rank]
-    quad_cost = data.quad_cost[data.rank]
+    x_0 = data.x_0
+    linear_cost = data.linear_cost
+    quad_cost = data.quad_cost
     # Output smoothness cost
-    linear_cost += data.linear_cost_smoothness_const @ x_0
+    linear_cost += data.shared.linear_cost_smoothness_const @ x_0
 
     # --- Add constraints - see thesis document for derivations ---
     # Waypoint position cost and/or equality constraint
-    G_wp = data.matrices.M_p_S_u_W_input[t_idx]
-    h_wp = des_pos - data.matrices.M_p_S_x[t_idx] @ x_0
+    matrices = data.shared.matrices
+    G_wp = matrices.M_p_S_u_W_input[t_idx]
+    h_wp = des_pos - matrices.M_p_S_x[t_idx] @ x_0
 
     quad_cost += 2 * settings.pos_weight * G_wp.T @ G_wp
     linear_cost += -2 * settings.pos_weight * G_wp.T @ h_wp
@@ -135,58 +135,55 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
         )
 
     # Waypoint velocity cost and/or equality constraint
-    G_wv = data.matrices.M_v_S_u_W_input[t_idx]
-    h_wv = des_vel - data.matrices.M_v_S_x[t_idx] @ x_0
+    G_wv = matrices.M_v_S_u_W_input[t_idx]
+    h_wv = des_vel - matrices.M_v_S_x[t_idx] @ x_0
     quad_cost += 2 * settings.vel_weight * G_wv.T @ G_wv
     linear_cost += -2 * settings.vel_weight * G_wv.T @ h_wv
     if settings.vel_constraints:
         data.vel_constraint = EqualityConstraint.init(G_wv, h_wv, settings.waypoints_vel_tol)
 
     # Waypoint acceleration cost and/or equality constraint
-    G_wa = data.matrices.M_a_S_u_prime_W_input[t_idx]
-    h_wa = des_acc - data.matrices.M_a_S_x_prime[t_idx] @ x_0
+    G_wa = matrices.M_a_S_u_prime_W_input[t_idx]
+    h_wa = des_acc - matrices.M_a_S_x_prime[t_idx] @ x_0
     quad_cost += 2 * settings.acc_weight * G_wa.T @ G_wa
     linear_cost += -2 * settings.acc_weight * G_wa.T @ h_wa
     if settings.acc_constraints:
         data.acc_constraint = EqualityConstraint.init(G_wa, h_wa, settings.waypoints_acc_tol)
 
     # Input continuity cost and/or equality constraint
-    u_0 = data.previous_trajectory.u_pos[data.rank, 0]
-    u_dot_0 = data.previous_trajectory.u_vel[data.rank, 0]
-    u_ddot_0 = data.previous_trajectory.u_acc[data.rank, 0]
+    u_0 = data.u_pos[0]
+    u_dot_0 = data.u_vel[0]
+    u_ddot_0 = data.u_acc[0]
     h_u = jp.concatenate([u_0, u_dot_0, u_ddot_0])
-    linear_cost += -2 * settings.input_continuity_weight * data.matrices.G_u.T @ h_u
+    linear_cost += -2 * settings.input_continuity_weight * matrices.G_u.T @ h_u
     if settings.input_continuity_constraints:
         data = data.replace(
             input_continuity_constraint=EqualityConstraint.init(
-                data.matrices.G_u, h_u, settings.input_continuity_tol
+                matrices.G_u, h_u, settings.input_continuity_tol
             )
         )
 
     # Position constraint
-    upper = jp.tile(settings.pos_max, settings.K + 1) - data.matrices.M_p_S_x @ x_0
-    lower = -jp.tile(settings.pos_min, settings.K + 1) + data.matrices.M_p_S_x @ x_0
+    upper = jp.tile(settings.pos_max, settings.K + 1) - matrices.M_p_S_x @ x_0
+    lower = -jp.tile(settings.pos_min, settings.K + 1) + matrices.M_p_S_x @ x_0
     h_p = jp.concatenate([upper, lower])
     data = data.replace(
-        max_pos_constraint=InequalityConstraint.init(data.matrices.G_p, h_p, settings.pos_limit_tol)
+        max_pos_constraint=InequalityConstraint.init(matrices.G_p, h_p, settings.pos_limit_tol)
     )
 
     # Velocity constraint
-    c_v = data.matrices.M_v_S_x @ x_0
+    c_v = matrices.M_v_S_x @ x_0
     data = data.replace(
         max_vel_constraint=PolarInequalityConstraint.init(
-            data.matrices.M_v_S_u_W_input,
-            c_v,
-            upr_bound=settings.vel_max,
-            tol=settings.vel_limit_tol,
+            matrices.M_v_S_u_W_input, c_v, upr_bound=settings.vel_max, tol=settings.vel_limit_tol
         )
     )
 
     # Acceleration constraint
-    c_a = data.matrices.M_a_S_x_prime @ x_0
+    c_a = matrices.M_a_S_x_prime @ x_0
     data = data.replace(
         max_acc_constraint=PolarInequalityConstraint.init(
-            data.matrices.M_a_S_u_prime_W_input,
+            matrices.M_a_S_u_prime_W_input,
             c_a,
             upr_bound=settings.acc_max,
             tol=settings.acc_limit_tol,
@@ -194,16 +191,16 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
     )
 
     # Collision constraints
-    n_collisions = min(settings.max_collisions, data.n_drones - 1)
-    min_dist = jp.min(data.distance_matrix[data.rank], axis=-1)
+    n_collisions = min(settings.max_collisions, settings.n_drones - 1)
+    min_dist = jp.min(data.distances, axis=-1)
     closest_drones = jp.argsort(min_dist)[:n_collisions]
     G_c_batched = jp.zeros((n_collisions, 3 * (settings.K + 1), 3 * (settings.N + 1)))
     c_c_batched = jp.zeros((n_collisions, 3 * (settings.K + 1)))
 
     envelope = jp.tile(1 / settings.collision_envelope, settings.K + 1)
     for i, d in enumerate(closest_drones):
-        c_c = envelope * (data.matrices.M_p_S_x @ x_0 - data.previous_trajectory.pos[d].flatten())
-        G_c_batched = G_c_batched.at[i].set(envelope[:, None] * data.matrices.M_p_S_u_W_input)
+        c_c = envelope * (matrices.M_p_S_x @ x_0 - data.shared.pos[d].flatten())
+        G_c_batched = G_c_batched.at[i].set(envelope[:, None] * matrices.M_p_S_u_W_input)
         c_c_batched = c_c_batched.at[i].set(c_c)
     active = jp.zeros(n_collisions, dtype=bool)
     active = active.at[:n_collisions].set(min_dist[closest_drones] <= 1.0)
@@ -216,8 +213,8 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
             active=active,
         )
     )
-    data = data.replace(linear_cost=data.linear_cost.at[data.rank].set(linear_cost))
-    data = data.replace(quad_cost=data.quad_cost.at[data.rank].set(quad_cost))
+    data = data.replace(linear_cost=data.linear_cost.at[...].set(linear_cost))
+    data = data.replace(quad_cost=data.quad_cost.at[...].set(quad_cost))
     return data
 
 
@@ -225,21 +222,15 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
 def spline2states(data: SolverData, settings: SolverSettings) -> SolverData:
     """Extract position, velocity, and acceleration trajectories from solution coefficients."""
     K = settings.K
-    # Extract position trajectory from state trajectory
-    zeta = data.zeta[data.rank]
-    x_0 = data.x_0[data.rank]
-    pos = (data.matrices.S_x @ x_0 + data.matrices.S_u_W_input @ zeta).T.reshape((K + 1, 6))[:, :3]
-    u_pos = (data.matrices.W @ zeta).T.reshape((K, 3))
-    u_vel = (data.matrices.W_dot @ zeta).T.reshape((K, 3))
-    u_acc = (data.matrices.W_ddot @ zeta).T.reshape(K, 3)
-    # Get input position, velocity and acceleration from spline coefficients
-    trajectory = data.trajectory.replace(
-        pos=data.trajectory.pos.at[data.rank].set(pos),
-        u_pos=data.trajectory.u_pos.at[data.rank].set(u_pos),
-        u_vel=data.trajectory.u_vel.at[data.rank].set(u_vel),
-        u_acc=data.trajectory.u_acc.at[data.rank].set(u_acc),
-    )
-    return data.replace(trajectory=trajectory)
+    matrices = data.shared.matrices
+    zeta, x_0 = data.zeta, data.x_0
+    # Extract trajectories from zeta and x_0
+    pos = (matrices.S_x @ x_0 + matrices.S_u_W_input @ zeta).T.reshape((K + 1, 6))[:, :3]
+    u_pos = (matrices.W @ zeta).T.reshape((K, 3))
+    u_vel = (matrices.W_dot @ zeta).T.reshape((K, 3))
+    u_acc = (matrices.W_ddot @ zeta).T.reshape(K, 3)
+    data = data.replace(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc)
+    return data
 
 
 @jax.jit
@@ -249,8 +240,8 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
     Not meant to be overridden by child classes.
     """
     rho = settings.rho_init
-    zeta = data.zeta[data.rank]  # Previously was zero initialized, now uses previous solution
-    bregman_mult = jp.zeros(data.quad_cost[data.rank].shape[0])  # Bregman multiplier
+    zeta = data.zeta  # Previously was zero initialized, now uses previous solution
+    bregman_mult = jp.zeros(data.quad_cost.shape[0])  # Bregman multiplier
 
     # Aggregate quadratic and linear terms from all constraints
     Q_cnstr = quadratic_constraint_costs(data)
@@ -268,8 +259,8 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
         # Unpack values
         i, zeta, rho, bregman_mult, q_cnstr, Q_cnstr, data, settings = val
         # Solve QP
-        Q = data.quad_cost[data.rank] + rho * Q_cnstr
-        q = data.linear_cost[data.rank] + rho * (q_cnstr - bregman_mult)
+        Q = data.quad_cost + rho * Q_cnstr
+        q = data.linear_cost + rho * (q_cnstr - bregman_mult)
         zeta = jp.linalg.solve(Q, -q)
         # Update constraints
         data = data.replace(
@@ -293,13 +284,13 @@ def am_solve(data: SolverData, settings: SolverSettings) -> tuple[bool, int, Sol
     i, zeta, rho, bregman_mult, q_cnstr, Q_cnstr, data, settings = jax.lax.while_loop(
         cond_fn, loop_fn, (0, zeta, rho, bregman_mult, q_cnstr, Q_cnstr, data, settings)
     )
-    data = data.replace(zeta=data.zeta.at[data.rank].set(zeta))
+    data = data.replace(zeta=zeta)
     return i != settings.max_iters, i, data
 
 
 @jax.jit
 def quadratic_constraint_costs(data: SolverData) -> Array:
-    Q_cnstr = jp.zeros_like(data.quad_cost[data.rank])
+    Q_cnstr = jp.zeros_like(data.quad_cost)
     if data.pos_constraint is not None:
         Q_cnstr += EqualityConstraint.quadratic_term(data.pos_constraint)
     if data.vel_constraint is not None:
@@ -317,7 +308,7 @@ def quadratic_constraint_costs(data: SolverData) -> Array:
 
 @jax.jit
 def linear_constraint_costs(data: SolverData) -> Array:
-    q_cnstr = jp.zeros_like(data.linear_cost[data.rank])
+    q_cnstr = jp.zeros_like(data.linear_cost)
     if data.pos_constraint is not None:
         q_cnstr += EqualityConstraint.linear_term(data.pos_constraint)
     if data.vel_constraint is not None:

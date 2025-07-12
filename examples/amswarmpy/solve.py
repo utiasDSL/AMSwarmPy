@@ -42,8 +42,8 @@ def solve_swarm(
 
 
 def set_horizon(t: float, data: SolverData, settings: SolverSettings) -> SolverData:
-    in_horizon, t_discrete = filter_horizon(data.waypoints["time"][0], t, settings.K, settings.freq)
-    in_horizon = jp.where(in_horizon)[0]
+    start, end, t_discrete = filter_horizon(data.waypoints["time"][0], t, settings.K, settings.freq)
+    in_horizon = jp.arange(start, end)
     if len(in_horizon) < 1:
         raise RuntimeError(
             "Error: no waypoints within current horizon. Increase horizon or add waypoints."
@@ -343,7 +343,7 @@ def constraints_satisfied(zeta: Array, data: SolverData) -> Array:
 
 
 @partial(jax.jit, static_argnums=(2, 3))
-def filter_horizon(times: Array, t: float, K: int, mpc_freq: float) -> tuple[Array, Array]:
+def filter_horizon(times: Array, t: float, K: int, mpc_freq: float) -> tuple[int, int, Array]:
     """Extract waypoints in current horizon.
 
     Args:
@@ -361,4 +361,7 @@ def filter_horizon(times: Array, t: float, K: int, mpc_freq: float) -> tuple[Arr
     rounded_times = jp.asarray(jp.round((times - t) * mpc_freq), dtype=int)
     # Find time steps with waypoints within current horizon
     in_horizon = (rounded_times > 0) & (rounded_times <= K)
-    return in_horizon, rounded_times
+    # Get the first and last index where in_horizon is True
+    start = jp.argmax(in_horizon)
+    end = len(in_horizon) - jp.argmax(jp.flip(in_horizon))
+    return start, end, rounded_times

@@ -212,7 +212,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         logger.warning("Solve failed")
 
     pos, vel = waypoints["pos"][:, 0], waypoints["vel"][:, 0]
-
+    control = np.zeros((sim.n_worlds, sim.n_drones, 13), dtype=np.float32)
     sim.reset()
     # Set initial position states to first waypoint for each drone
     sim.data = sim.data.replace(states=sim.data.states.replace(pos=pos[None, ...]))

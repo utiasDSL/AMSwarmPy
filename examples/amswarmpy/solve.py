@@ -19,7 +19,7 @@ def solve(
     # therefore the only function we cannot compile with jax.jit.
     data = set_horizon(data, settings)
     # After setting the horizon, everything else is static and hence gets compiled
-    return solve_swarm(states, t, data, settings)
+    return solve_swarm(states, float(t), data, settings)
 
 
 @jax.jit
@@ -55,9 +55,8 @@ def set_horizon(data: SolverData, settings: SolverSettings) -> SolverData:
 
 @jax.jit
 def compute_swarm_distances(data: SolverData, settings: SolverSettings) -> Array:
-    pos = data.previous_trajectory.pos
     col = 1.0 / settings.collision_envelope
-    distances = jp.linalg.norm((pos[None, ...] - pos[:, None, ...]) * col, axis=-1)
+    distances = jp.linalg.norm((data.pos[None, ...] - data.pos[:, None, ...]) * col, axis=-1)
     distances = jp.where(jp.eye(data.n_drones, dtype=bool)[..., None], jp.inf, distances)
     return distances
 
@@ -151,9 +150,9 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
         data.acc_constraint = EqualityConstraint.init(G_wa, h_wa, settings.waypoints_acc_tol)
 
     # Input continuity cost and/or equality constraint
-    u_0 = data.previous_trajectory.u_pos[data.rank, 0]
-    u_dot_0 = data.previous_trajectory.u_vel[data.rank, 0]
-    u_ddot_0 = data.previous_trajectory.u_acc[data.rank, 0]
+    u_0 = data.u_pos[data.rank, 0]
+    u_dot_0 = data.u_vel[data.rank, 0]
+    u_ddot_0 = data.u_acc[data.rank, 0]
     h_u = jp.concatenate([u_0, u_dot_0, u_ddot_0])
     linear_cost += -2 * settings.input_continuity_weight * data.matrices.G_u.T @ h_u
     if settings.input_continuity_constraints:
@@ -202,7 +201,7 @@ def add_constraints(data: SolverData, settings: SolverSettings) -> SolverData:
 
     envelope = jp.tile(1 / settings.collision_envelope, settings.K + 1)
     for i, d in enumerate(closest_drones):
-        c_c = envelope * (data.matrices.M_p_S_x @ x_0 - data.previous_trajectory.pos[d].flatten())
+        c_c = envelope * (data.matrices.M_p_S_x @ x_0 - data.pos[d].flatten())
         G_c_batched = G_c_batched.at[i].set(envelope[:, None] * data.matrices.M_p_S_u_W_input)
         c_c_batched = c_c_batched.at[i].set(c_c)
     active = jp.zeros(n_collisions, dtype=bool)
@@ -233,13 +232,13 @@ def spline2states(data: SolverData, settings: SolverSettings) -> SolverData:
     u_vel = (data.matrices.W_dot @ zeta).T.reshape((K, 3))
     u_acc = (data.matrices.W_ddot @ zeta).T.reshape(K, 3)
     # Get input position, velocity and acceleration from spline coefficients
-    trajectory = data.trajectory.replace(
-        pos=data.trajectory.pos.at[data.rank].set(pos),
-        u_pos=data.trajectory.u_pos.at[data.rank].set(u_pos),
-        u_vel=data.trajectory.u_vel.at[data.rank].set(u_vel),
-        u_acc=data.trajectory.u_acc.at[data.rank].set(u_acc),
+    data = data.replace(
+        pos=data.pos.at[data.rank].set(pos),
+        u_pos=data.u_pos.at[data.rank].set(u_pos),
+        u_vel=data.u_vel.at[data.rank].set(u_vel),
+        u_acc=data.u_acc.at[data.rank].set(u_acc),
     )
-    return data.replace(trajectory=trajectory)
+    return data
 
 
 @jax.jit

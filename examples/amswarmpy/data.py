@@ -34,9 +34,11 @@ class SolverData:
     linear_cost: Array  # n_drones x 3 * (N + 1)
     zeta: Array  # n_drones x 3 * (N + 1)
     x_0: Array  # n_drones x 6 (pos, vel)
-    trajectory: Trajectory
-    previous_trajectory: Trajectory
-    distance_matrix: Array  # n_drones x n_drones
+    pos: Array  # n_drones x K+1 x 3 matrix, each row is position at a timestep
+    u_pos: Array  # n_drones x K x 3 matrix
+    u_vel: Array  # n_drones x K x 3 matrix
+    u_acc: Array  # n_drones x K x 3 matrix
+    distance_matrix: Array  # n_drones x n_drones x K+1
     # Constraints
     collision_constraints: PolarInequalityConstraint | None = None
     pos_constraint: EqualityConstraint | None = None
@@ -62,11 +64,16 @@ class SolverData:
         input_continuity_weight: float,
     ) -> SolverData:
         n_drones = waypoints["pos"].shape[0]
-        trajectory = Trajectory.init(waypoints["pos"][:, 0], K, n_drones)
         # Init optimization variable
         zeta = jp.zeros((n_drones, 3 * (N + 1)))
         x_0 = jp.concat((waypoints["pos"][:, 0], waypoints["vel"][:, 0]), axis=-1)
         matrices = Matrices.from_dynamics(A, B, A_prime, B_prime, K, N, freq)
+        pos = waypoints["pos"][:, 0]
+        assert pos.shape == (n_drones, 3), f"{pos.shape} != {(n_drones, 3)}"
+        u_pos = jp.tile(pos[:, None, :], (1, K, 1))
+        assert u_pos.shape == (n_drones, K, 3), f"{u_pos.shape} != {(n_drones, K, 3)}"
+        pos = jp.tile(pos[:, None, :], (1, K + 1, 1))
+        assert pos.shape == (n_drones, K + 1, 3), f"{pos.shape} != {(n_drones, K + 1, 3)}"
 
         quad_cost, linear_cost_smoothness_const = init_cost(
             smoothness_weight, input_smoothness_weight, input_continuity_weight, matrices, n_drones
@@ -86,47 +93,26 @@ class SolverData:
             linear_cost_smoothness_const=linear_cost_smoothness_const,
             zeta=zeta,
             x_0=x_0,
-            trajectory=deepcopy(trajectory),
-            previous_trajectory=trajectory,
-            distance_matrix=jp.zeros((n_drones, n_drones)),
-        )
-
-
-@dataclass(frozen=False)
-class Trajectory:
-    """Swarm trajectories"""
-
-    pos: Array  # n_drones x K+1 x 3 matrix, each row is position at a timestep
-    u_pos: Array  # n_drones x K x 3 matrix
-    u_vel: Array  # n_drones x K x 3 matrix
-    u_acc: Array  # n_drones x K x 3 matrix
-
-    @staticmethod
-    @partial(jax.jit, static_argnames=("K", "n_drones"))
-    def init(pos: Array, K: int, n_drones: int) -> Trajectory:
-        """Generate initial trajectory"""
-        assert pos.shape == (n_drones, 3), f"{pos.shape} != {(n_drones, 3)}"
-        u_pos = jp.tile(pos[:, None, :], (1, K, 1))
-        assert u_pos.shape == (n_drones, K, 3), f"{u_pos.shape} != {(n_drones, K, 3)}"
-        pos = jp.tile(pos[:, None, :], (1, K + 1, 1))
-        assert pos.shape == (n_drones, K + 1, 3), f"{pos.shape} != {(n_drones, K + 1, 3)}"
-        return Trajectory(
-            pos=pos, u_pos=u_pos, u_vel=jp.zeros((n_drones, K, 3)), u_acc=jp.zeros((n_drones, K, 3))
+            pos=pos,
+            u_pos=u_pos,
+            u_vel=jp.zeros((n_drones, K, 3)),
+            u_acc=jp.zeros((n_drones, K, 3)),
+            distance_matrix=jp.zeros((n_drones, n_drones, K + 1)),
         )
 
     @staticmethod
     @jax.jit
-    def step(traj: Trajectory) -> Trajectory:
+    def step(data: SolverData) -> SolverData:
         """Advance trajectories by one step for next solve iteration"""
         # Extrapolate last position by adding the difference between last two positions
-        extrapolated_pos = 2 * traj.pos[:, -1] - traj.pos[:, -2]
-        pos = traj.pos.at[:, :-1].set(traj.pos[:, 1:])
+        extrapolated_pos = 2 * data.pos[:, -1] - data.pos[:, -2]
+        pos = data.pos.at[:, :-1].set(data.pos[:, 1:])
         pos = pos.at[:, -1].set(extrapolated_pos)
-        # Advance input trajectories - only shift values since we only check first row
-        u_pos = traj.u_pos.at[:, :-1].set(traj.u_pos[:, 1:])
-        u_vel = traj.u_vel.at[:, :-1].set(traj.u_vel[:, 1:])
-        u_acc = traj.u_acc.at[:, :-1].set(traj.u_acc[:, 1:])
-        return traj.replace(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc)
+        # Advance input dataectories - only shift values since we only check first row
+        u_pos = data.u_pos.at[:, :-1].set(data.u_pos[:, 1:])
+        u_vel = data.u_vel.at[:, :-1].set(data.u_vel[:, 1:])
+        u_acc = data.u_acc.at[:, :-1].set(data.u_acc[:, 1:])
+        return data.replace(pos=pos, u_pos=u_pos, u_vel=u_vel, u_acc=u_acc)
 
 
 @dataclass

@@ -23,10 +23,10 @@ def solve(
 
 
 def _set_horizon(data: SolverData, settings: SolverSettings) -> SolverData:
-    in_horizon, t_discrete = _filter_horizon(
+    start, end, t_discrete = _filter_horizon(
         data.waypoints["time"][data.rank], data.current_time, settings.K, settings.freq
     )
-    in_horizon = jp.where(in_horizon)[0]
+    in_horizon = jp.arange(start, end)
     if len(in_horizon) < 1:
         raise RuntimeError(
             "Error: no waypoints within current horizon. Increase horizon or add waypoints."
@@ -357,7 +357,7 @@ def _constraints_satisfied(zeta: Array, data: SolverData) -> Array:
 
 
 @partial(jax.jit, static_argnums=(2, 3))
-def _filter_horizon(times: Array, t: float, K: int, mpc_freq: float) -> tuple[Array, Array]:
+def _filter_horizon(times: Array, t: float, K: int, mpc_freq: float) -> tuple[int, int, Array]:
     """Extract waypoints in current horizon.
 
     Args:
@@ -375,4 +375,6 @@ def _filter_horizon(times: Array, t: float, K: int, mpc_freq: float) -> tuple[Ar
     rounded_times = jp.asarray(jp.round((times - t) * mpc_freq), dtype=int)
     # Find time steps with waypoints within current horizon
     in_horizon = (rounded_times > 0) & (rounded_times <= K)
-    return in_horizon, rounded_times
+    start = jp.argmax(in_horizon)
+    end = len(in_horizon) - jp.argmax(jp.flip(in_horizon))
+    return start, end, rounded_times

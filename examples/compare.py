@@ -212,17 +212,16 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     if not all(success):
         logger.warning("Solve failed")
 
-    pos, vel = waypoints["pos"][:, 0], waypoints["vel"][:, 0]
-
     sim.reset()
     # Set initial position states to first waypoint for each drone
     control = np.zeros((sim.n_worlds, sim.n_drones, 13), dtype=np.float32)
-    sim.data = sim.data.replace(states=sim.data.states.replace(pos=pos[None, ...]))
+    pos = sim.data.states.pos.at[0, ...].set(waypoints["pos"][:, 0])
+    sim.data = sim.data.replace(states=sim.data.states.replace(pos=pos))
 
     for step in range(n_steps):
         t = step / settings.freq
 
-        states = np.concat((pos, vel), axis=-1, dtype=np.float32)
+        states = np.concat((solver_data.u_pos[:, 0], solver_data.u_vel[:, 0]), axis=-1)
         success, _, solver_data = amswarmpy.solve(states, t, solver_data, settings)
         if not all(success):
             logger.warning("Solve failed")
@@ -240,8 +239,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
                 draw_points(sim, waypoints["pos"][i], rgba=rgbas[i], size=0.02)
             sim.render()
 
-        pos, vel = np.asarray(sim.data.states.pos[0]), np.asarray(sim.data.states.vel[0])
-        trajectories[step] = pos
+        trajectories[step] = sim.data.states.pos[0]
 
     return trajectories
 

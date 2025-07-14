@@ -288,20 +288,13 @@ def main(render: bool = False):
     t2 = time.perf_counter()
     results_amswarmpy = simulate_amswarmpy(sim, waypoints, render=render)
     print(f"AMSwarm (cpp) time: {t2 - t1:.2f} seconds")
-    tstart = time.perf_counter()
-    results_amswarmpy = None
-    from pyinstrument import Profiler
 
-    profiler = Profiler()
-    profiler.start()
+    results_amswarmpy = None
+    tstart = time.perf_counter()
     results_amswarmpy = simulate_amswarmpy(sim, waypoints, render=render)
-    profiler.stop()
     tstop = time.perf_counter()
     print(f"AMSwarmPy time: {tstop - tstart:.2f} seconds")
     sim.close()
-
-    # View the profile in an HTML viewer
-    profiler.write_html(Path(__file__).parents[1] / "profile.html")
 
     plot_trajectories(sim, waypoints, results_amswarm, results_amswarmpy)
 

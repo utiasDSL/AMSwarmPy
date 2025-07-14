@@ -1,21 +1,13 @@
-"""
-AMSwarm Simulation with Line Formation and Benchmarking
-
-This module simulates drone swarm behavior using AMSwarm for trajectory planning,
-with drones arranged in a line on the x-axis flying from y=-1 to y=1.
-It also includes benchmarking functionality to measure AMSwarm's performance.
-"""
+"""axswarm simulation of a spiral formation."""
 
 from __future__ import annotations
 
 import logging
-import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import fire
-import jax
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
@@ -23,14 +15,12 @@ from crazyflow import Sim
 from crazyflow.utils import enable_cache
 from utils import draw_line, draw_points
 
-from amswarm import SolverData, SolverSettings, solve
+from axswarm import SolverData, SolverSettings, solve
 
 if TYPE_CHECKING:
     from crazyflow import Sim
     from numpy.typing import NDArray
 
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
-jax.config.update("jax_platform_name", "cpu")
 enable_cache()
 
 logger = logging.getLogger(__name__)
@@ -103,11 +93,6 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         input_smoothness_weight=settings.input_smoothness_weight,
         input_continuity_weight=settings.input_continuity_weight,
     )
-    states = np.concat((waypoints["pos"][:, 0], np.zeros((n_drones, 3))), axis=-1, dtype=np.float32)
-    success, _, solver_data = solve(states, 0.0, solver_data, settings)
-
-    if not all(success):
-        logger.warning("Solve failed")
 
     sim.reset()
     # Set initial position states to first waypoint for each drone
@@ -119,7 +104,7 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
         t = step / settings.freq
 
         # states = np.concat((solver_data.u_pos[:, 0], solver_data.u_vel[:, 0]), axis=-1)
-        pos, vel = np.asarray(sim.data.states.pos[0]), np.asarray(sim.data.states.vel[0])
+        pos, vel = (np.asarray(sim.data.states.pos[0]), np.asarray(sim.data.states.vel[0]))
         states = np.concat((pos, vel), axis=-1)
         success, _, solver_data = solve(states, t, solver_data, settings)
         if not all(success):

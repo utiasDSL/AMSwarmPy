@@ -17,9 +17,10 @@ def solve(
 ) -> tuple[Array[bool], Array[int], SolverData]:
     # The horizon is dynamically shaped based on which waypoints are in the current horizon. This is
     # therefore the only function we cannot compile with jax.jit.
-    data = _set_horizon(data, settings)
-    # After setting the horizon, everything else is static and hence gets compiled
-    return _solve(states, float(t), data, settings)
+    with jax.default_device(data.pos.device):
+        data = _set_horizon(data, settings)
+        # After setting the horizon, everything else is static and hence gets compiled
+        return _solve(states, float(t), data, settings)
 
 
 def _set_horizon(data: SolverData, settings: SolverSettings) -> SolverData:

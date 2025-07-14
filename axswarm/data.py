@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from functools import partial
 
 import jax
@@ -23,7 +22,7 @@ class SolverData:
 
     # Shared data across drones
     current_time: float
-    rank: int  # TODO: Remove
+    rank: int
     quad_cost_init: Array  # 3 * (N + 1) x 3 * (N + 1)
     linear_cost_smoothness_const: Array  # 3 * (N + 1)
     in_horizon: Array | None  # dynamic shape! If the shape changes, jax recompiles
@@ -64,20 +63,25 @@ class SolverData:
         input_continuity_weight: float,
     ) -> SolverData:
         n_drones = waypoints["pos"].shape[0]
-        # Init optimization variable
-        zeta = jp.zeros((n_drones, 3 * (N + 1)))
-        x_0 = jp.concat((waypoints["pos"][:, 0], waypoints["vel"][:, 0]), axis=-1)
-        matrices = Matrices.from_dynamics(A, B, A_prime, B_prime, K, N, freq)
-        pos = waypoints["pos"][:, 0]
-        assert pos.shape == (n_drones, 3), f"{pos.shape} != {(n_drones, 3)}"
-        u_pos = jp.tile(pos[:, None, :], (1, K, 1))
-        assert u_pos.shape == (n_drones, K, 3), f"{u_pos.shape} != {(n_drones, K, 3)}"
-        pos = jp.tile(pos[:, None, :], (1, K + 1, 1))
-        assert pos.shape == (n_drones, K + 1, 3), f"{pos.shape} != {(n_drones, K + 1, 3)}"
-
-        quad_cost, linear_cost_smoothness_const = init_cost(
-            smoothness_weight, input_smoothness_weight, input_continuity_weight, matrices, n_drones
-        )
+        device = jax.devices("cpu")[0]
+        with jax.default_device(device):
+            # Init optimization variable
+            zeta = jp.zeros((n_drones, 3 * (N + 1)))
+            x_0 = jp.concat((waypoints["pos"][:, 0], waypoints["vel"][:, 0]), axis=-1)
+            matrices = Matrices.from_dynamics(A, B, A_prime, B_prime, K, N, freq)
+            pos = waypoints["pos"][:, 0]
+            assert pos.shape == (n_drones, 3), f"{pos.shape} != {(n_drones, 3)}"
+            u_pos = jp.tile(pos[:, None, :], (1, K, 1))
+            assert u_pos.shape == (n_drones, K, 3), f"{u_pos.shape} != {(n_drones, K, 3)}"
+            pos = jp.tile(pos[:, None, :], (1, K + 1, 1))
+            assert pos.shape == (n_drones, K + 1, 3), f"{pos.shape} != {(n_drones, K + 1, 3)}"
+            quad_cost, linear_cost_smoothness_const = init_cost(
+                smoothness_weight,
+                input_smoothness_weight,
+                input_continuity_weight,
+                matrices,
+                n_drones,
+            )
 
         return SolverData(
             n_drones=n_drones,
@@ -89,15 +93,15 @@ class SolverData:
             t_discrete=None,
             quad_cost=quad_cost,
             quad_cost_init=quad_cost[0].copy(),
-            linear_cost=jp.zeros((n_drones, 3 * (N + 1))),
+            linear_cost=jp.zeros((n_drones, 3 * (N + 1)), device=device),
             linear_cost_smoothness_const=linear_cost_smoothness_const,
             zeta=zeta,
             x_0=x_0,
             pos=pos,
             u_pos=u_pos,
-            u_vel=jp.zeros((n_drones, K, 3)),
-            u_acc=jp.zeros((n_drones, K, 3)),
-            distance_matrix=jp.zeros((n_drones, n_drones, K + 1)),
+            u_vel=jp.zeros((n_drones, K, 3), device=device),
+            u_acc=jp.zeros((n_drones, K, 3), device=device),
+            distance_matrix=jp.zeros((n_drones, n_drones, K + 1), device=device),
         )
 
     @staticmethod

@@ -257,9 +257,9 @@ packages:
   size: 21899
   timestamp: 1734603085333
 - pypi: ./
-  name: amswarm
+  name: axswarm
   version: 0.1.0
-  sha256: efef15430b46141b8056ebbc4bc2e2464b9ff913a85eb4e445425a97c5369d6c
+  sha256: 8c15c5ba34b314d4c2d83f6896a6556e11a20a39c5de644ba4cb88df23787a02
   requires_dist:
   - crazyflow[gpu]>=0.0.1,<0.0.2
   requires_python: '>=3.8'

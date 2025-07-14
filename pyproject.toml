@@ -9,10 +9,10 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["amswarm"]
+packages = ["axswarm"]
 
 [project]
-name = "amswarm"
+name = "axswarm"
 version = "0.1.0"
 license = "MIT"
 readme = "README.md"
@@ -41,7 +41,7 @@ channels = ["conda-forge"]
 platforms = ["linux-64"]
 
 [tool.pixi.pypi-dependencies]
-amswarm = { path = ".", editable = true}
+axswarm = { path = ".", editable = true}
 
 [tool.pixi.tasks]
 

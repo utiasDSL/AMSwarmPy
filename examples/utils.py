@@ -138,7 +138,7 @@ def draw_points(sim: Sim, points: NDArray, rgba: NDArray | None = None, size: fl
     if rgba is None:
         rgba = np.array([1.0, 0, 0, 1])
     mats = np.eye(3).flatten()
-    for i in range(len(points) - 1):
+    for i in range(len(points)):
         viewer.add_marker(
             type=mujoco.mjtGeom.mjGEOM_SPHERE, size=size, pos=points[i], mat=mats, rgba=rgba
         )

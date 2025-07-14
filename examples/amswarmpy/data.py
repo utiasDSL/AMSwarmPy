@@ -138,10 +138,17 @@ class Matrices:
     G_p: Array
 
     @staticmethod
-    @partial(jax.jit, static_argnames=("K", "N", "freq"))
-    def from_dynamics(A, B, A_prime, B_prime, K: int, N: int, freq: int):
+    @partial(jax.jit, static_argnames=("K", "N", "freq", "disable"))
+    def from_dynamics(A, B, A_prime, B_prime, K: int, N: int, freq: int, disable: bool = False):
         W, W_dot, W_ddot = bernstein_matrices(K, N, freq)
         W_input = bernstein_input(W, W_dot)
+
+        if disable:
+            A = jp.zeros_like(A)
+            A_prime = jp.zeros_like(A_prime)
+            n = B.shape[0]
+            B = jp.eye(n)
+            B_prime = jp.eye(n)
 
         S_x, S_u, S_x_prime, S_u_prime = full_horizon_dynamics(A, B, A_prime, B_prime, K)
         # Precompute matrices that don't change at solve time

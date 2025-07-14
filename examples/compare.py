@@ -221,7 +221,9 @@ def simulate_amswarmpy(sim, waypoints, render=False) -> NDArray:
     for step in range(n_steps):
         t = step / settings.freq
 
-        states = np.concat((solver_data.u_pos[:, 0], solver_data.u_vel[:, 0]), axis=-1)
+        # states = np.concat((solver_data.u_pos[:, 0], solver_data.u_vel[:, 0]), axis=-1)
+        pos, vel = np.asarray(sim.data.states.pos[0]), np.asarray(sim.data.states.vel[0])
+        states = np.concat((pos, vel), axis=-1)
         success, _, solver_data = amswarmpy.solve(states, t, solver_data, settings)
         if not all(success):
             logger.warning("Solve failed")

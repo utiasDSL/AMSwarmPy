@@ -259,10 +259,11 @@ packages:
 - pypi: ./
   name: amswarm
   version: 0.1.0
-  sha256: fd1fa5f7e2043b6c7c52cd3720b45f43cfa32d38c1fdc1a23806a2a195eb9b0d
+  sha256: efef15430b46141b8056ebbc4bc2e2464b9ff913a85eb4e445425a97c5369d6c
   requires_dist:
   - crazyflow[gpu]>=0.0.1,<0.0.2
   requires_python: '>=3.8'
+  editable: true
 - conda: https://conda.anaconda.org/conda-forge/linux-64/brotli-1.1.0-hb9d3cd8_3.conda
   sha256: c969baaa5d7a21afb5ed4b8dd830f82b78e425caaa13d717766ed07a61630bec
   md5: 5d08a0ac29e6a5a984817584775d4131
